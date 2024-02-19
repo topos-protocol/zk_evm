@@ -12,6 +12,7 @@ use crate::cpu::stack::{
     MIGHT_OVERFLOW, STACK_BEHAVIORS,
 };
 use crate::generation::state::GenerationState;
+use crate::generation::State;
 use crate::memory::segments::Segment;
 use crate::witness::errors::ProgramError;
 use crate::witness::gas::gas_to_charge;
@@ -186,7 +187,7 @@ fn fill_op_flag<F: Field>(op: Operation, row: &mut CpuColumnsView<F>) {
 
 // Equal to the number of pops if an operation pops without pushing, and `None`
 // otherwise.
-const fn get_op_special_length(op: Operation) -> Option<usize> {
+pub(crate) const fn get_op_special_length(op: Operation) -> Option<usize> {
     let behavior_opt = match op {
         Operation::Push(0) | Operation::Pc => STACK_BEHAVIORS.pc_push0,
         Operation::Push(1..) | Operation::ProverInput => STACK_BEHAVIORS.push_prover_input,
@@ -227,7 +228,7 @@ const fn get_op_special_length(op: Operation) -> Option<usize> {
 // These operations might trigger a stack overflow, typically those pushing
 // without popping. Kernel-only pushing instructions aren't considered; they
 // can't overflow.
-const fn might_overflow_op(op: Operation) -> bool {
+pub(crate) const fn might_overflow_op(op: Operation) -> bool {
     match op {
         Operation::Push(1..) | Operation::ProverInput => MIGHT_OVERFLOW.push_prover_input,
         Operation::Dup(_) | Operation::Swap(_) => MIGHT_OVERFLOW.dup_swap,
@@ -255,10 +256,12 @@ const fn might_overflow_op(op: Operation) -> bool {
 }
 
 fn perform_op<F: Field>(
-    state: &mut GenerationState<F>,
+    all_state: &mut State<F>,
     op: Operation,
     row: CpuColumnsView<F>,
-) -> Result<Operation, ProgramError> {
+) -> Result<(), ProgramError> {
+    let state = all_state.get_generation_state();
+
     match op {
         Operation::Push(n) => generate_push(n, state, row)?,
         Operation::Dup(n) => generate_dup(n, state, row)?,
@@ -292,25 +295,40 @@ fn perform_op<F: Field>(
         Operation::MstoreGeneral => generate_mstore_general(state, row)?,
     };
 
-    state.registers.program_counter += match op {
+    Ok(())
+}
+
+fn perform_op_with_fn<F: Field>(
+    all_state: &mut State<F>,
+    opcode: u8,
+    op: Operation,
+    row: CpuColumnsView<F>,
+) -> Result<Operation, ProgramError> {
+    match all_state {
+        State::Generation(state) => perform_op(all_state, op, row)?,
+        State::Interpreter(interpreter) => interpreter.run_opcode(opcode)?,
+    }
+
+    all_state.incr_pc(match op {
         Operation::Syscall(_, _, _) | Operation::ExitKernel => 0,
         Operation::Push(n) => n as usize + 1,
         Operation::Jump | Operation::Jumpi => 0,
         _ => 1,
-    };
+    });
 
-    state.registers.gas_used += gas_to_charge(op);
-
+    all_state.incr_gas(gas_to_charge(op));
+    let registers = all_state.get_registers();
     let gas_limit_address = MemoryAddress::new(
-        state.registers.context,
+        registers.context,
         Segment::ContextMetadata,
         ContextMetadata::GasLimit.unscale(), // context offsets are already scaled
     );
-    if !state.registers.is_kernel {
-        let gas_limit = TryInto::<u64>::try_into(state.memory.get(gas_limit_address));
+
+    if !registers.is_kernel {
+        let gas_limit = TryInto::<u64>::try_into(all_state.get_from_memory(gas_limit_address));
         match gas_limit {
             Ok(limit) => {
-                if state.registers.gas_used > limit {
+                if registers.gas_used > limit {
                     return Err(ProgramError::OutOfGas);
                 }
             }
@@ -320,7 +338,6 @@ fn perform_op<F: Field>(
 
     Ok(op)
 }
-
 /// Row that has the correct values for system registers and the code channel,
 /// but is otherwise blank. It fulfills the constraints that are common to
 /// successful operations and the exception operation. It also returns the
@@ -342,8 +359,9 @@ fn base_row<F: Field>(state: &mut GenerationState<F>) -> (CpuColumnsView<F>, u8)
 pub(crate) fn fill_stack_fields<F: Field>(
     state: &mut GenerationState<F>,
     row: &mut CpuColumnsView<F>,
+    is_generation: bool,
 ) -> Result<(), ProgramError> {
-    if state.registers.is_stack_top_read {
+    if state.registers.is_stack_top_read && is_generation {
         let channel = &mut row.mem_channels[0];
         channel.used = F::ONE;
         channel.is_read = F::ONE;
@@ -365,10 +383,10 @@ pub(crate) fn fill_stack_fields<F: Field>(
             state.registers.stack_top,
         );
         state.traces.push_memory(mem_op);
-        state.registers.is_stack_top_read = false;
     }
+    state.registers.is_stack_top_read = false;
 
-    if state.registers.check_overflow {
+    if state.registers.check_overflow && is_generation {
         if state.registers.is_kernel {
             row.general.stack_mut().stack_len_bounds_aux = F::ZERO;
         } else {
@@ -383,15 +401,16 @@ pub(crate) fn fill_stack_fields<F: Field>(
                 return Err(ProgramError::InterpreterError);
             }
         }
-        state.registers.check_overflow = false;
     }
+    state.registers.check_overflow = false;
 
     Ok(())
 }
 
-fn try_perform_instruction<F: Field>(
-    state: &mut GenerationState<F>,
-) -> Result<Operation, ProgramError> {
+fn try_perform_instruction<F: Field>(all_state: &mut State<F>) -> Result<Operation, ProgramError> {
+    let is_generation = all_state.is_generation_state();
+    let state = all_state.get_mut_state();
+
     let (mut row, opcode) = base_row(state);
     let op = decode(state.registers, opcode)?;
 
@@ -401,18 +420,26 @@ fn try_perform_instruction<F: Field>(
         log::debug!("User instruction: {:?}", op);
     }
 
-    fill_op_flag(op, &mut row);
+    if is_generation {
+        fill_op_flag(op, &mut row);
+    }
 
-    fill_stack_fields(state, &mut row)?;
+    fill_stack_fields(state, &mut row, is_generation)?;
 
     // Might write in general CPU columns when it shouldn't, but the correct values
     // will overwrite these ones during the op generation.
     if let Some(special_len) = get_op_special_length(op) {
-        let special_len = F::from_canonical_usize(special_len);
-        let diff = row.stack_len - special_len;
-        if let Some(inv) = diff.try_inverse() {
+        let special_len_f = F::from_canonical_usize(special_len);
+        let diff = row.stack_len - special_len_f;
+        if let Some(inv) = diff.try_inverse()
+            && is_generation
+        {
             row.general.stack_mut().stack_inv = inv;
             row.general.stack_mut().stack_inv_aux = F::ONE;
+            state.registers.is_stack_top_read = true;
+        } else if !is_generation && (state.stack().len() == special_len) {
+            // If the `State` is an interpreter, we cannot rely on the row to carry out the
+            // check.
             state.registers.is_stack_top_read = true;
         }
     } else if let Some(inv) = row.stack_len.try_inverse() {
@@ -420,7 +447,7 @@ fn try_perform_instruction<F: Field>(
         row.general.stack_mut().stack_inv_aux = F::ONE;
     }
 
-    perform_op(state, op, row)
+    perform_op_with_fn(all_state, opcode, op, row)
 }
 
 fn log_kernel_instruction<F: Field>(state: &GenerationState<F>, op: Operation) {
@@ -452,7 +479,7 @@ fn log_kernel_instruction<F: Field>(state: &GenerationState<F>, op: Operation) {
     assert!(pc < KERNEL.code.len(), "Kernel PC is out of range: {}", pc);
 }
 
-fn handle_error<F: Field>(state: &mut GenerationState<F>, err: ProgramError) -> anyhow::Result<()> {
+fn handle_error<F: Field>(all_state: &mut State<F>, err: ProgramError) -> anyhow::Result<()> {
     let exc_code: u8 = match err {
         ProgramError::OutOfGas => 0,
         ProgramError::InvalidOpcode => 1,
@@ -463,45 +490,52 @@ fn handle_error<F: Field>(state: &mut GenerationState<F>, err: ProgramError) -> 
         _ => bail!("TODO: figure out what to do with this..."),
     };
 
-    let checkpoint = state.checkpoint();
+    let checkpoint = all_state.checkpoint();
 
-    let (row, _) = base_row(state);
-    generate_exception(exc_code, state, row)
-        .map_err(|_| anyhow::Error::msg("error handling errored..."))?;
+    match all_state {
+        State::Generation(state) => {
+            let (row, _) = base_row(state);
+            generate_exception(exc_code, state, row)
+                .map_err(|_| anyhow::Error::msg("error handling errored..."))?;
+        }
+        State::Interpreter(interpreter) => {
+            interpreter
+                .run_exception(exc_code)
+                .map_err(|_| anyhow::Error::msg("error handling errored..."))?;
+        }
+    }
 
-    state
-        .memory
-        .apply_ops(state.traces.mem_ops_since(checkpoint.traces));
+    all_state.apply_ops(checkpoint);
+
     Ok(())
 }
 
-pub(crate) fn transition<F: Field>(state: &mut GenerationState<F>) -> anyhow::Result<()> {
-    let checkpoint = state.checkpoint();
-    let result = try_perform_instruction(state);
+pub(crate) fn transition<F: Field>(all_state: &mut State<F>) -> anyhow::Result<()> {
+    let checkpoint = all_state.checkpoint();
+    let result = try_perform_instruction(all_state);
 
     match result {
         Ok(op) => {
-            state
-                .memory
-                .apply_ops(state.traces.mem_ops_since(checkpoint.traces));
+            all_state.apply_ops(checkpoint);
+
             if might_overflow_op(op) {
-                state.registers.check_overflow = true;
+                all_state.get_mut_registers().check_overflow = true;
             }
             Ok(())
         }
         Err(e) => {
-            if state.registers.is_kernel {
-                let offset_name = KERNEL.offset_name(state.registers.program_counter);
+            if all_state.get_registers().is_kernel {
+                let offset_name = KERNEL.offset_name(all_state.get_registers().program_counter);
                 bail!(
                     "{:?} in kernel at pc={}, stack={:?}, memory={:?}",
                     e,
                     offset_name,
-                    state.stack(),
-                    state.memory.contexts[0].segments[Segment::KernelGeneral.unscale()].content,
+                    all_state.get_stack(),
+                    all_state.mem_get_kernel_content(),
                 );
             }
-            state.rollback(checkpoint);
-            handle_error(state, e)
+            all_state.rollback(checkpoint);
+            handle_error(all_state, e)
         }
     }
 }

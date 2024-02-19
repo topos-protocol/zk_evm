@@ -35,7 +35,7 @@ fn test_insert_accessed_addresses() -> Result<()> {
     // Test for address already in list.
     let initial_stack = vec![retaddr, U256::from(addr_in_list.0.as_slice())];
     let mut interpreter: Interpreter<F> =
-        Interpreter::new_with_kernel(insert_accessed_addresses, initial_stack);
+        Interpreter::new(insert_accessed_addresses, initial_stack);
     for i in 0..n {
         let addr = U256::from(addresses[i].0.as_slice());
         interpreter
@@ -60,7 +60,7 @@ fn test_insert_accessed_addresses() -> Result<()> {
     // Test for address not in list.
     let initial_stack = vec![retaddr, U256::from(addr_not_in_list.0.as_slice())];
     let mut interpreter: Interpreter<F> =
-        Interpreter::new_with_kernel(insert_accessed_addresses, initial_stack);
+        Interpreter::new(insert_accessed_addresses, initial_stack);
     for i in 0..n {
         let addr = U256::from(addresses[i].0.as_slice());
         interpreter
@@ -119,7 +119,7 @@ fn test_insert_accessed_storage_keys() -> Result<()> {
         U256::from(storage_key_in_list.0 .0.as_slice()),
     ];
     let mut interpreter: Interpreter<F> =
-        Interpreter::new_with_kernel(insert_accessed_storage_keys, initial_stack);
+        Interpreter::new(insert_accessed_storage_keys, initial_stack);
     for i in 0..n {
         let addr = U256::from(storage_keys[i].0 .0.as_slice());
         interpreter
@@ -157,7 +157,7 @@ fn test_insert_accessed_storage_keys() -> Result<()> {
         U256::from(storage_key_not_in_list.0 .0.as_slice()),
     ];
     let mut interpreter: Interpreter<F> =
-        Interpreter::new_with_kernel(insert_accessed_storage_keys, initial_stack);
+        Interpreter::new(insert_accessed_storage_keys, initial_stack);
     for i in 0..n {
         let addr = U256::from(storage_keys[i].0 .0.as_slice());
         interpreter
