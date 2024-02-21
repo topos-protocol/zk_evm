@@ -20,9 +20,7 @@ use crate::all_stark::{AllStark, NUM_TABLES};
 use crate::cpu::columns::CpuColumnsView;
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::constants::global_metadata::GlobalMetadata;
-use crate::cpu::kernel::interpreter::{
-    self, Interpreter, InterpreterCheckpoint, InterpreterMemOpKind,
-};
+use crate::cpu::kernel::interpreter::{self, Interpreter, InterpreterMemOpKind};
 use crate::generation::state::GenerationState;
 use crate::generation::trie_extractor::{get_receipt_trie, get_state_trie, get_txn_trie};
 use crate::memory::segments::Segment;
@@ -321,19 +319,19 @@ pub(crate) enum State<'a, F: Field> {
     Interpreter(&'a mut Interpreter<F>),
 }
 
-/// A Checkpoint for a `State`: it can be either an `Interpreter`'s or a
-/// `GenerationState`'s checkpoint.
-pub(crate) enum Checkpoint {
-    Generation(GenerationStateCheckpoint),
-    Interpreter(InterpreterCheckpoint),
-}
+// /// A Checkpoint for a `State`: it can be either an `Interpreter`'s or a
+// /// `GenerationState`'s checkpoint.
+// pub(crate) enum Checkpoint {
+//     Generation(GenerationStateCheckpoint),
+//     Interpreter(InterpreterCheckpoint),
+// }
 
 impl<'a, F: Field> State<'a, F> {
     /// Returns a `State`'s `Checkpoint`.
-    pub(crate) fn checkpoint(&mut self) -> Checkpoint {
+    pub(crate) fn checkpoint(&mut self) -> GenerationStateCheckpoint {
         match self {
-            Self::Generation(state) => Checkpoint::Generation(state.checkpoint()),
-            Self::Interpreter(interpreter) => Checkpoint::Interpreter(interpreter.checkpoint()),
+            Self::Generation(state) => state.checkpoint(),
+            Self::Interpreter(interpreter) => interpreter.checkpoint(),
         }
     }
 
@@ -419,33 +417,29 @@ impl<'a, F: Field> State<'a, F> {
         }
     }
 
-    fn get_generation_state_checkpoint(ckpt: Checkpoint) -> GenerationStateCheckpoint {
-        match ckpt {
-            Checkpoint::Generation(checkpoint) => checkpoint,
-            Checkpoint::Interpreter(checkpoint) => {
-                panic!("Cannot get a GenerationStateCheckpoint from an InterpreterCheckpoint")
-            }
-        }
-    }
+    // fn get_generation_state_checkpoint(ckpt: Checkpoint) ->
+    // GenerationStateCheckpoint {     match ckpt {
+    //         Checkpoint::Generation(checkpoint) => checkpoint,
+    //         Checkpoint::Interpreter(checkpoint) => {
+    //             panic!("Cannot get a GenerationStateCheckpoint from an
+    // InterpreterCheckpoint")         }
+    //     }
+    // }
 
-    fn get_interpreter_checkpoint(ckpt: Checkpoint) -> InterpreterCheckpoint {
-        match ckpt {
-            Checkpoint::Generation(checkpoint) => {
-                panic!("Cannot get an InterpreterCheckpoint from a GenerationStateCheckpoint")
-            }
-            Checkpoint::Interpreter(checkpoint) => checkpoint,
-        }
-    }
+    // fn get_interpreter_checkpoint(ckpt: Checkpoint) -> InterpreterCheckpoint {
+    //     match ckpt {
+    //         Checkpoint::Generation(checkpoint) => {
+    //             panic!("Cannot get an InterpreterCheckpoint from a
+    // GenerationStateCheckpoint")         }
+    //         Checkpoint::Interpreter(checkpoint) => checkpoint,
+    //     }
+    // }
 
     /// Rolls back a `State`.
-    pub(crate) fn rollback(&mut self, checkpoint: Checkpoint) {
+    pub(crate) fn rollback(&mut self, checkpoint: GenerationStateCheckpoint) {
         match self {
-            Self::Generation(state) => {
-                state.rollback(Self::get_generation_state_checkpoint(checkpoint))
-            }
-            Self::Interpreter(interpreter) => {
-                interpreter.rollback(Self::get_interpreter_checkpoint(checkpoint))
-            }
+            Self::Generation(state) => state.rollback(checkpoint),
+            Self::Interpreter(interpreter) => interpreter.generation_state.rollback(checkpoint),
         }
     }
 
@@ -486,28 +480,13 @@ impl<'a, F: Field> State<'a, F> {
     }
 
     /// Applies a `State`'s operations since a checkpoint `ckpt`.
-    pub(crate) fn apply_ops(&mut self, ckpt: Checkpoint) {
+    pub(crate) fn apply_ops(&mut self, checkpoint: GenerationStateCheckpoint) {
         match self {
-            Self::Generation(state) => {
-                let checkpoint = match ckpt {
-                    Checkpoint::Generation(checkpoint) => checkpoint,
-                    Checkpoint::Interpreter(checkpoint) => {
-                        panic!("Cannot have an `Interpreter` checkpoint for a `GenerationState`.")
-                    }
-                };
-
-                state
-                    .memory
-                    .apply_ops(state.traces.mem_ops_since(checkpoint.traces))
-            }
+            Self::Generation(state) => state
+                .memory
+                .apply_ops(state.traces.mem_ops_since(checkpoint.traces)),
             Self::Interpreter(interpreter) => {
-                let checkpoint = match ckpt {
-                    Checkpoint::Generation(checkpoint) => {
-                        panic!("Cannot have a `GenerationState` checkpoint for an `Interpreter`.")
-                    }
-                    Checkpoint::Interpreter(checkpoint) => checkpoint,
-                };
-                interpreter.apply_memops(checkpoint.get_mem_len());
+                interpreter.apply_memops();
             }
         }
     }

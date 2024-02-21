@@ -24,15 +24,20 @@ use crate::extension_tower::BN_BASE;
 use crate::generation::mpt::load_all_mpts;
 use crate::generation::prover_input::ProverInputFn;
 use crate::generation::rlp::all_rlp_prover_inputs_reversed;
-use crate::generation::state::{self, all_withdrawals_prover_inputs_reversed, GenerationState};
+use crate::generation::state::{
+    self, all_withdrawals_prover_inputs_reversed, GenerationState, GenerationStateCheckpoint,
+};
 use crate::generation::{run_cpu, GenerationInputs, State};
 use crate::memory::segments::{Segment, SEGMENT_SCALING_FACTOR};
 use crate::util::{h2u, u256_to_u8, u256_to_usize};
 use crate::witness::errors::{ProgramError, ProverInputError};
 use crate::witness::gas::gas_to_charge;
-use crate::witness::memory::{MemoryAddress, MemoryContextState, MemorySegmentState, MemoryState};
+use crate::witness::memory::{
+    MemoryAddress, MemoryContextState, MemoryOp, MemoryOpKind, MemorySegmentState, MemoryState,
+};
 use crate::witness::operation::{Operation, CONTEXT_SCALING_FACTOR};
 use crate::witness::state::RegistersState;
+use crate::witness::traces::{TraceCheckpoint, Traces};
 use crate::witness::transition::{decode, get_op_special_length, might_overflow_op};
 use crate::witness::util::{push_no_write, stack_peek};
 use crate::{arithmetic, logic};
@@ -48,11 +53,11 @@ pub(crate) struct Interpreter<F: Field> {
     // The interpreter will halt only if the current context matches halt_context
     pub(crate) halt_context: Option<usize>,
     pub(crate) debug_offsets: Vec<usize>,
-    opcode_count: [usize; 0x100],
+    pub(crate) opcode_count: [usize; 0x100],
     memops: Vec<InterpreterMemOpKind>,
     jumpdest_table: HashMap<usize, BTreeSet<usize>>,
     preinitialized_segments: HashMap<Segment, MemorySegmentState>,
-    is_jumpdest_analysis: bool,
+    pub(crate) is_jumpdest_analysis: bool,
     pub(crate) clock: usize,
 }
 
@@ -63,19 +68,19 @@ struct InterpreterRegistersState {
     registers: RegistersState,
 }
 
-/// Interpreter state at the last checkpoint: we only need to store
-/// the state of the registers and the length of the vector of memory
-/// operations. This data is enough to revert in case of an exception.
-pub(crate) struct InterpreterCheckpoint {
-    registers: InterpreterRegistersState,
-    mem_len: usize,
-}
+// /// Interpreter state at the last checkpoint: we only need to store
+// /// the state of the registers and the length of the vector of memory
+// /// operations. This data is enough to revert in case of an exception.
+// pub(crate) struct InterpreterCheckpoint {
+//     registers: InterpreterRegistersState,
+//     mem_len: usize,
+// }
 
-impl InterpreterCheckpoint {
-    pub(crate) fn get_mem_len(&self) -> usize {
-        self.mem_len
-    }
-}
+// impl InterpreterCheckpoint {
+//     pub(crate) fn get_mem_len(&self) -> usize {
+//         self.mem_len
+//     }
+// }
 
 pub(crate) fn run_interpreter<F: Field>(
     initial_offset: usize,
@@ -441,61 +446,96 @@ impl<F: Field> Interpreter<F> {
     }
 
     /// Applies all memory operations since the last checkpoint.
-    pub(crate) fn apply_memops(&mut self, len: usize) -> Result<(), anyhow::Error> {
-        for memop in self.memops[len..].iter() {
-            match *memop {
-                InterpreterMemOpKind::Read(val, addr) => {
-                    if self.generation_state.memory.get_option(addr).is_none() {
+    pub(crate) fn apply_memops(&mut self) -> Result<(), anyhow::Error> {
+        for memop in &self.generation_state.traces.memory_ops {
+            let &MemoryOp {
+                kind,
+                address,
+                value,
+                ..
+            } = memop;
+            match kind {
+                MemoryOpKind::Read => {
+                    if self.generation_state.memory.get_option(address).is_none() {
                         if !self
                             .preinitialized_segments
-                            .contains_key(&Segment::all()[addr.segment])
+                            .contains_key(&Segment::all()[address.segment])
                         {
                             assert_eq!(
-                                val,
+                                value,
                                 0.into(),
                                 "value read {:?} at address {:?} should be 0",
-                                val,
-                                addr
+                                value,
+                                address
                             );
                         }
-                        self.generation_state.memory.set(addr, val);
+                        self.generation_state.memory.set(address, value);
                     }
                 }
-                InterpreterMemOpKind::Write(val, addr) => {
-                    self.generation_state.memory.set(addr, val)
-                }
+                MemoryOpKind::Write => self.generation_state.memory.set(address, value),
             }
         }
+        // for memop in self.memops[len..].iter() {
+        //     match *memop {
+        //         InterpreterMemOpKind::Read(val, addr) => {
+        //             if self.generation_state.memory.get_option(addr).is_none() {
+        //                 if !self
+        //                     .preinitialized_segments
+        //                     .contains_key(&Segment::all()[addr.segment])
+        //                 {
+        //                     assert_eq!(
+        //                         val,
+        //                         0.into(),
+        //                         "value read {:?} at address {:?} should be 0",
+        //                         val,
+        //                         addr
+        //                     );
+        //                 }
+        //                 self.generation_state.memory.set(addr, val);
+        //             }
+        //         }
+        //         InterpreterMemOpKind::Write(val, addr) => {
+        //             self.generation_state.memory.set(addr, val)
+        //         }
+        //     }
+        // }
 
         Ok(())
     }
 
-    /// Returns an `InterpreterCheckpoint` to save the current state of the
-    /// interpreter.
-    pub(crate) fn checkpoint(&self) -> InterpreterCheckpoint {
-        let registers = InterpreterRegistersState {
-            kernel_mode: self.is_kernel(),
-            context: self.context(),
+    // /// Returns an `InterpreterCheckpoint` to save the current state of the
+    // /// interpreter.
+    // pub(crate) fn checkpoint(&self) -> InterpreterCheckpoint {
+    //     let registers = InterpreterRegistersState {
+    //         kernel_mode: self.is_kernel(),
+    //         context: self.context(),
+    //         registers: self.generation_state.registers,
+    //     };
+    //     InterpreterCheckpoint {
+    //         registers,
+    //         mem_len: self.memops.len(),
+    //     }
+    // }
+    pub(crate) fn checkpoint(&mut self) -> GenerationStateCheckpoint {
+        self.generation_state.traces.memory_ops = vec![];
+        GenerationStateCheckpoint {
             registers: self.generation_state.registers,
-        };
-        InterpreterCheckpoint {
-            registers,
-            mem_len: self.memops.len(),
+            traces: self.generation_state.traces.checkpoint(),
         }
     }
 
-    /// Rolls back to the previous state saved in the `InterpreterCheckpoint`.
-    pub(crate) fn rollback(&mut self, checkpoint: InterpreterCheckpoint) {
-        let InterpreterRegistersState {
-            kernel_mode,
-            context,
-            registers,
-        } = checkpoint.registers;
-        self.set_is_kernel(kernel_mode);
-        self.set_context(context);
-        self.generation_state.registers = registers;
-        self.memops.truncate(checkpoint.mem_len);
-    }
+    // /// Rolls back to the previous state saved in the `InterpreterCheckpoint`.
+    // pub(crate) fn rollback(&mut self, checkpoint: InterpreterCheckpoint) {
+    //     let InterpreterRegistersState {
+    //         kernel_mode,
+    //         context,
+    //         registers,
+    //     } = checkpoint.registers;
+    //     self.set_is_kernel(kernel_mode);
+    //     self.set_context(context);
+    //     self.generation_state.registers = registers;
+    //     self.memops.truncate(checkpoint.mem_len);
+    // }
 
     /// Generates a segment by returning the state and memory values after
     /// `MAX_SIZE` CPU rows.
@@ -516,7 +556,7 @@ impl<F: Field> Interpreter<F> {
         Ok(())
     }
 
-    fn code(&self) -> &MemorySegmentState {
+    pub(crate) fn code(&self) -> &MemorySegmentState {
         // The context is 0 if we are in kernel mode.
         &self.generation_state.memory.contexts[(1 - self.is_kernel() as usize) * self.context()]
             .segments[Segment::Code.unscale()]
@@ -663,6 +703,16 @@ impl<F: Field> Interpreter<F> {
 
     pub(crate) fn set_rlp_memory(&mut self, rlp: Vec<u8>) {
         self.set_memory_segment_bytes(Segment::RlpRaw, rlp)
+    }
+
+    pub(crate) fn clear_traces(&mut self) {
+        self.generation_state.traces.arithmetic_ops = vec![];
+        self.generation_state.traces.arithmetic_ops = vec![];
+        self.generation_state.traces.byte_packing_ops = vec![];
+        self.generation_state.traces.cpu = vec![];
+        self.generation_state.traces.logic_ops = vec![];
+        self.generation_state.traces.keccak_inputs = vec![];
+        self.generation_state.traces.keccak_sponge_ops = vec![];
     }
 
     pub(crate) fn set_code(&mut self, context: usize, code: Vec<u8>) {

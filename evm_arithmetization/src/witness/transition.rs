@@ -259,8 +259,50 @@ pub(crate) const fn might_overflow_op(op: Operation) -> bool {
 fn perform_op<F: Field>(
     any_state: &mut State<F>,
     op: Operation,
+    opcode: u8,
     row: CpuColumnsView<F>,
 ) -> Result<(), ProgramError> {
+    // Jumpdest analysis is performed natively by the interpreter and not
+    // using the non-deterministic Kernel assembly code.
+    let op = match any_state {
+        State::Generation(state) => op,
+        State::Interpreter(interpreter) => {
+            let op = if interpreter.is_kernel()
+                && interpreter.is_jumpdest_analysis
+                && interpreter.generation_state.registers.program_counter
+                    == KERNEL.global_labels["jumpdest_analysis"]
+            {
+                interpreter.generation_state.registers.program_counter =
+                    KERNEL.global_labels["jumpdest_analysis_end"];
+                interpreter
+                    .generation_state
+                    .set_jumpdest_bits(&interpreter.generation_state.get_current_code()?);
+                let opcode = interpreter
+                    .code()
+                    .get(interpreter.generation_state.registers.program_counter)
+                    .byte(0);
+                decode(interpreter.generation_state.registers, opcode)?
+            } else {
+                op
+            };
+            op
+        }
+    };
+
+    // #[cfg(debug_assertions)]
+    // if !self.is_kernel() {
+    //     log::debug!(
+    //         "User instruction {:?}, stack = {:?}, ctx = {}",
+    //         op,
+    //         {
+    //             let mut stack = self.stack();
+    //             stack.reverse();
+    //             stack
+    //         },
+    //         self.generation_state.registers.context
+    //     );
+    // }
+
     let state = any_state.get_generation_state();
 
     match op {
@@ -295,7 +337,13 @@ fn perform_op<F: Field>(
         Operation::MloadGeneral => generate_mload_general(state, row)?,
         Operation::MstoreGeneral => generate_mstore_general(state, row)?,
     };
-
+    match any_state {
+        State::Generation(state) => {}
+        State::Interpreter(interpreter) => {
+            interpreter.clear_traces();
+            interpreter.opcode_count[opcode as usize] += 1;
+        }
+    }
     Ok(())
 }
 
@@ -305,11 +353,11 @@ fn perform_state_op<F: Field>(
     op: Operation,
     row: CpuColumnsView<F>,
 ) -> Result<Operation, ProgramError> {
-    match any_state {
-        State::Generation(state) => perform_op(any_state, op, row)?,
-        State::Interpreter(interpreter) => interpreter.run_opcode(opcode, op)?,
-    }
-
+    // match any_state {
+    //     State::Generation(state) => perform_op(any_state, op, row)?,
+    //     State::Interpreter(interpreter) => interpreter.run_opcode(opcode, op)?,
+    // }
+    perform_op(any_state, op, opcode, row)?;
     any_state.incr_pc(match op {
         Operation::Syscall(_, _, _) | Operation::ExitKernel => 0,
         Operation::Push(n) => n as usize + 1,
@@ -413,6 +461,28 @@ fn try_perform_instruction<F: Field>(any_state: &mut State<F>) -> Result<Operati
     let is_generation = any_state.is_generation_state();
     let registers = any_state.get_registers();
 
+    // if !is_generation {
+    //     if registers.is_stack_top_read {
+    //         let addr =
+    //             MemoryAddress::new(registers.context, Segment::Stack,
+    // registers.stack_len - 1);
+
+    //         let mem_op = MemoryOp::new(
+    //             GeneralPurpose(0),
+    //             any_state.get_clock(),
+    //             addr,
+    //             MemoryOpKind::Read,
+    //             any_state.get_stack_top(),
+    //         );
+    //         println!("mem op {:?}, stack {:?}", mem_op, any_state.get_stack());
+    //         any_state.push_memop(mem_op);
+    //         any_state.get_mut_registers().is_stack_top_read = false;
+    //     }
+    //     if registers.check_overflow {
+    //         any_state.get_mut_registers().check_overflow = false;
+    //     }
+    // }
+
     let state = any_state.get_mut_state();
     let (mut row, opcode) = base_row(state);
 
@@ -444,7 +514,6 @@ fn try_perform_instruction<F: Field>(any_state: &mut State<F>) -> Result<Operati
         } else if !is_generation && (state.stack().len() != special_len) {
             // If the `State` is an interpreter, we cannot rely on the row to carry out the
             // check.
-            println!("special op {:?}, stack len {:?}", op, state.stack().len());
             state.registers.is_stack_top_read = true;
         }
     } else if let Some(inv) = row.stack_len.try_inverse() {
