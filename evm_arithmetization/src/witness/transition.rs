@@ -7,6 +7,7 @@ use super::util::fill_channel_with_value;
 use crate::cpu::columns::CpuColumnsView;
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::constants::context_metadata::ContextMetadata;
+use crate::cpu::kernel::interpreter::InterpreterMemOpKind;
 use crate::cpu::stack::{
     EQ_STACK_BEHAVIOR, IS_ZERO_STACK_BEHAVIOR, JUMPI_OP, JUMP_OP, MAX_USER_STACK_SIZE,
     MIGHT_OVERFLOW, STACK_BEHAVIORS,
@@ -256,11 +257,11 @@ pub(crate) const fn might_overflow_op(op: Operation) -> bool {
 }
 
 fn perform_op<F: Field>(
-    all_state: &mut State<F>,
+    any_state: &mut State<F>,
     op: Operation,
     row: CpuColumnsView<F>,
 ) -> Result<(), ProgramError> {
-    let state = all_state.get_generation_state();
+    let state = any_state.get_generation_state();
 
     match op {
         Operation::Push(n) => generate_push(n, state, row)?,
@@ -298,26 +299,26 @@ fn perform_op<F: Field>(
     Ok(())
 }
 
-fn perform_op_with_fn<F: Field>(
-    all_state: &mut State<F>,
+fn perform_state_op<F: Field>(
+    any_state: &mut State<F>,
     opcode: u8,
     op: Operation,
     row: CpuColumnsView<F>,
 ) -> Result<Operation, ProgramError> {
-    match all_state {
-        State::Generation(state) => perform_op(all_state, op, row)?,
-        State::Interpreter(interpreter) => interpreter.run_opcode(opcode)?,
+    match any_state {
+        State::Generation(state) => perform_op(any_state, op, row)?,
+        State::Interpreter(interpreter) => interpreter.run_opcode(opcode, op)?,
     }
 
-    all_state.incr_pc(match op {
+    any_state.incr_pc(match op {
         Operation::Syscall(_, _, _) | Operation::ExitKernel => 0,
         Operation::Push(n) => n as usize + 1,
         Operation::Jump | Operation::Jumpi => 0,
         _ => 1,
     });
 
-    all_state.incr_gas(gas_to_charge(op));
-    let registers = all_state.get_registers();
+    any_state.incr_gas(gas_to_charge(op));
+    let registers = any_state.get_registers();
     let gas_limit_address = MemoryAddress::new(
         registers.context,
         Segment::ContextMetadata,
@@ -325,7 +326,7 @@ fn perform_op_with_fn<F: Field>(
     );
 
     if !registers.is_kernel {
-        let gas_limit = TryInto::<u64>::try_into(all_state.get_from_memory(gas_limit_address));
+        let gas_limit = TryInto::<u64>::try_into(any_state.get_from_memory(gas_limit_address));
         match gas_limit {
             Ok(limit) => {
                 if registers.gas_used > limit {
@@ -338,6 +339,7 @@ fn perform_op_with_fn<F: Field>(
 
     Ok(op)
 }
+
 /// Row that has the correct values for system registers and the code channel,
 /// but is otherwise blank. It fulfills the constraints that are common to
 /// successful operations and the exception operation. It also returns the
@@ -407,14 +409,16 @@ pub(crate) fn fill_stack_fields<F: Field>(
     Ok(())
 }
 
-fn try_perform_instruction<F: Field>(all_state: &mut State<F>) -> Result<Operation, ProgramError> {
-    let is_generation = all_state.is_generation_state();
-    let state = all_state.get_mut_state();
+fn try_perform_instruction<F: Field>(any_state: &mut State<F>) -> Result<Operation, ProgramError> {
+    let is_generation = any_state.is_generation_state();
+    let registers = any_state.get_registers();
 
+    let state = any_state.get_mut_state();
     let (mut row, opcode) = base_row(state);
-    let op = decode(state.registers, opcode)?;
 
-    if state.registers.is_kernel {
+    let op = decode(registers, opcode)?;
+
+    if registers.is_kernel {
         log_kernel_instruction(state, op);
     } else {
         log::debug!("User instruction: {:?}", op);
@@ -437,9 +441,10 @@ fn try_perform_instruction<F: Field>(all_state: &mut State<F>) -> Result<Operati
             row.general.stack_mut().stack_inv = inv;
             row.general.stack_mut().stack_inv_aux = F::ONE;
             state.registers.is_stack_top_read = true;
-        } else if !is_generation && (state.stack().len() == special_len) {
+        } else if !is_generation && (state.stack().len() != special_len) {
             // If the `State` is an interpreter, we cannot rely on the row to carry out the
             // check.
+            println!("special op {:?}, stack len {:?}", op, state.stack().len());
             state.registers.is_stack_top_read = true;
         }
     } else if let Some(inv) = row.stack_len.try_inverse() {
@@ -447,7 +452,7 @@ fn try_perform_instruction<F: Field>(all_state: &mut State<F>) -> Result<Operati
         row.general.stack_mut().stack_inv_aux = F::ONE;
     }
 
-    perform_op_with_fn(all_state, opcode, op, row)
+    perform_state_op(any_state, opcode, op, row)
 }
 
 fn log_kernel_instruction<F: Field>(state: &GenerationState<F>, op: Operation) {
@@ -479,7 +484,7 @@ fn log_kernel_instruction<F: Field>(state: &GenerationState<F>, op: Operation) {
     assert!(pc < KERNEL.code.len(), "Kernel PC is out of range: {}", pc);
 }
 
-fn handle_error<F: Field>(all_state: &mut State<F>, err: ProgramError) -> anyhow::Result<()> {
+fn handle_error<F: Field>(any_state: &mut State<F>, err: ProgramError) -> anyhow::Result<()> {
     let exc_code: u8 = match err {
         ProgramError::OutOfGas => 0,
         ProgramError::InvalidOpcode => 1,
@@ -490,9 +495,9 @@ fn handle_error<F: Field>(all_state: &mut State<F>, err: ProgramError) -> anyhow
         _ => bail!("TODO: figure out what to do with this..."),
     };
 
-    let checkpoint = all_state.checkpoint();
+    let checkpoint = any_state.checkpoint();
 
-    match all_state {
+    match any_state {
         State::Generation(state) => {
             let (row, _) = base_row(state);
             generate_exception(exc_code, state, row)
@@ -505,37 +510,37 @@ fn handle_error<F: Field>(all_state: &mut State<F>, err: ProgramError) -> anyhow
         }
     }
 
-    all_state.apply_ops(checkpoint);
+    any_state.apply_ops(checkpoint);
 
     Ok(())
 }
 
-pub(crate) fn transition<F: Field>(all_state: &mut State<F>) -> anyhow::Result<()> {
-    let checkpoint = all_state.checkpoint();
-    let result = try_perform_instruction(all_state);
+pub(crate) fn transition<F: Field>(any_state: &mut State<F>) -> anyhow::Result<()> {
+    let checkpoint = any_state.checkpoint();
+    let result = try_perform_instruction(any_state);
 
     match result {
         Ok(op) => {
-            all_state.apply_ops(checkpoint);
+            any_state.apply_ops(checkpoint);
 
             if might_overflow_op(op) {
-                all_state.get_mut_registers().check_overflow = true;
+                any_state.get_mut_registers().check_overflow = true;
             }
             Ok(())
         }
         Err(e) => {
-            if all_state.get_registers().is_kernel {
-                let offset_name = KERNEL.offset_name(all_state.get_registers().program_counter);
+            if any_state.get_registers().is_kernel {
+                let offset_name = KERNEL.offset_name(any_state.get_registers().program_counter);
                 bail!(
                     "{:?} in kernel at pc={}, stack={:?}, memory={:?}",
                     e,
                     offset_name,
-                    all_state.get_stack(),
-                    all_state.mem_get_kernel_content(),
+                    any_state.get_stack(),
+                    any_state.mem_get_kernel_content(),
                 );
             }
-            all_state.rollback(checkpoint);
-            handle_error(all_state, e)
+            any_state.rollback(checkpoint);
+            handle_error(any_state, e)
         }
     }
 }

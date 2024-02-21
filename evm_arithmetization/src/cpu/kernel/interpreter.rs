@@ -134,12 +134,17 @@ pub(crate) fn simulate_cpu_and_get_user_jumps<F: Field>(
             let mut interpreter =
                 Interpreter::new_with_state_and_halt_condition(state, halt_pc, initial_context);
 
+            log::debug!("Simulating CPU for jumpdest analysis.");
+
             interpreter.run();
+
+            log::debug!("jdt = {:?}", interpreter.jumpdest_table);
 
             interpreter
                 .generation_state
                 .set_jumpdest_analysis_inputs(interpreter.jumpdest_table);
 
+            log::debug!("Simulated CPU for jumpdest analysis halted.");
             interpreter.generation_state.jumpdest_table
         }
     }
@@ -147,7 +152,7 @@ pub(crate) fn simulate_cpu_and_get_user_jumps<F: Field>(
 
 /// Different types of Memory operations in the interpreter.
 #[derive(Debug)]
-enum InterpreterMemOpKind {
+pub(crate) enum InterpreterMemOpKind {
     Read(U256, MemoryAddress),
     Write(U256, MemoryAddress),
 }
@@ -363,7 +368,7 @@ impl<F: Field> Interpreter<F> {
                 let address =
                     MemoryAddress::new(self.context(), Segment::Stack, self.stack_len() - 1 - i);
                 let val = self.generation_state.memory.get(address);
-                self.memops.push(InterpreterMemOpKind::Read(val, address));
+                self.push_memop(InterpreterMemOpKind::Read(val, address));
                 val
             }
         });
@@ -391,7 +396,7 @@ impl<F: Field> Interpreter<F> {
 
         if self.stack_len() > 0 {
             let addr = MemoryAddress::new(self.context(), Segment::Stack, self.stack_len() - 1);
-            self.memops.push(InterpreterMemOpKind::Write(
+            self.push_memop(InterpreterMemOpKind::Write(
                 self.stack_top().expect("Stack is not empty."),
                 addr,
             ));
@@ -422,19 +427,20 @@ impl<F: Field> Interpreter<F> {
         } else {
             val.unwrap()
         };
-        self.memops.push(InterpreterMemOpKind::Read(val, address));
+        self.push_memop(InterpreterMemOpKind::Read(val, address));
         val
     }
 
     // Does NOT change the memory. All queued operations will be applied at the end
     // of the transition step.
     fn mstore_queue(&mut self, context: usize, segment: Segment, offset: usize, value: U256) {
-        self.memops.push(InterpreterMemOpKind::Write(
+        self.push_memop(InterpreterMemOpKind::Write(
             value,
             MemoryAddress::new(context, segment, offset),
         ));
     }
 
+    /// Applies all memory operations since the last checkpoint.
     pub(crate) fn apply_memops(&mut self, len: usize) -> Result<(), anyhow::Error> {
         for memop in self.memops[len..].iter() {
             match *memop {
@@ -444,7 +450,13 @@ impl<F: Field> Interpreter<F> {
                             .preinitialized_segments
                             .contains_key(&Segment::all()[addr.segment])
                         {
-                            assert_eq!(val, 0.into());
+                            assert_eq!(
+                                val,
+                                0.into(),
+                                "value read {:?} at address {:?} should be 0",
+                                val,
+                                addr
+                            );
                         }
                         self.generation_state.memory.set(addr, val);
                     }
@@ -458,6 +470,8 @@ impl<F: Field> Interpreter<F> {
         Ok(())
     }
 
+    /// Returns an `InterpreterCheckpoint` to save the current state of the
+    /// interpreter.
     pub(crate) fn checkpoint(&self) -> InterpreterCheckpoint {
         let registers = InterpreterRegistersState {
             kernel_mode: self.is_kernel(),
@@ -470,6 +484,7 @@ impl<F: Field> Interpreter<F> {
         }
     }
 
+    /// Rolls back to the previous state saved in the `InterpreterCheckpoint`.
     pub(crate) fn rollback(&mut self, checkpoint: InterpreterCheckpoint) {
         let InterpreterRegistersState {
             kernel_mode,
@@ -479,30 +494,14 @@ impl<F: Field> Interpreter<F> {
         self.set_is_kernel(kernel_mode);
         self.set_context(context);
         self.generation_state.registers = registers;
-    }
-
-    fn handle_error(&mut self, err: ProgramError) -> anyhow::Result<()> {
-        let exc_code: u8 = match err {
-            ProgramError::OutOfGas => 0,
-            ProgramError::InvalidOpcode => 1,
-            ProgramError::StackUnderflow => 2,
-            ProgramError::InvalidJumpDestination => 3,
-            ProgramError::InvalidJumpiDestination => 4,
-            ProgramError::StackOverflow => 5,
-            _ => bail!("TODO: figure out what to do with this..."),
-        };
-        let checkpoint = self.checkpoint();
-        self.run_exception(exc_code)
-            .map_err(|_| anyhow::Error::msg("error handling errored..."))?;
-        self.apply_memops(checkpoint.mem_len);
-        Ok(())
+        self.memops.truncate(checkpoint.mem_len);
     }
 
     /// Generates a segment by returning the state and memory values after
     /// `MAX_SIZE` CPU rows.
     pub(crate) fn run(&mut self) -> Result<(), anyhow::Error> {
-        let mut all_state = State::Interpreter(self);
-        run_cpu(&mut all_state, false)?;
+        let mut state = State::Interpreter(self);
+        run_cpu(&mut state, false)?;
 
         #[cfg(debug_assertions)]
         {
@@ -514,7 +513,6 @@ impl<F: Field> Interpreter<F> {
             }
             println!("Total: {}", self.opcode_count.into_iter().sum::<usize>());
         }
-        println!("Total: {}", self.opcode_count.into_iter().sum::<usize>());
         Ok(())
     }
 
@@ -701,6 +699,10 @@ impl<F: Field> Interpreter<F> {
         self.generation_state.registers.program_counter += n;
     }
 
+    pub(crate) fn push_memop(&mut self, mem_op: InterpreterMemOpKind) {
+        self.memops.push(mem_op);
+    }
+
     pub(crate) fn stack(&self) -> Vec<U256> {
         match self.stack_len().cmp(&1) {
             Ordering::Greater => {
@@ -783,7 +785,7 @@ impl<F: Field> Interpreter<F> {
         result
     }
 
-    pub(crate) fn run_opcode(&mut self, opcode: u8) -> Result<(), ProgramError> {
+    pub(crate) fn run_opcode(&mut self, opcode: u8, op: Operation) -> Result<(), ProgramError> {
         // Jumpdest analysis is performed natively by the interpreter and not
         // using the non-deterministic Kernel assembly code.
         let opcode = if self.is_kernel()
@@ -802,15 +804,10 @@ impl<F: Field> Interpreter<F> {
             opcode
         };
 
-        let op = decode(self.generation_state.registers, opcode)
-            // We default to prover inputs, as those are kernel-only instructions that charge
-            // nothing.
-            .unwrap_or(Operation::ProverInput);
-
         #[cfg(debug_assertions)]
         if !self.is_kernel() {
             log::debug!(
-                "########## User instruction {:?}, stack = {:?}, ctx = {}",
+                "User instruction {:?}, stack = {:?}, ctx = {}",
                 op,
                 {
                     let mut stack = self.stack();
@@ -904,7 +901,7 @@ impl<F: Field> Interpreter<F> {
                 log::warn!(
                     "Kernel panic at {}, stack = {:?}, memory = {:?}",
                     KERNEL.offset_name(self.generation_state.registers.program_counter),
-                    self.generation_state.stack(),
+                    self.stack(),
                     self.get_kernel_general_memory()
                 );
                 Err(ProgramError::KernelPanic)
@@ -1057,13 +1054,12 @@ impl<F: Field> Interpreter<F> {
     }
 
     fn run_iszero(&mut self) -> anyhow::Result<(), ProgramError> {
-        let x = self.interpreter_pop::<1>()?[0];
+        let [x] = self.interpreter_pop::<1>()?;
         self.push_bool_no_write(x.is_zero())
     }
 
     fn run_and(&mut self) -> anyhow::Result<(), ProgramError> {
-        let vals = self.interpreter_pop::<2>()?;
-        let (x, y) = (vals[0], vals[1]);
+        let [x, y] = self.interpreter_pop::<2>()?;
         self.interpreter_push_no_write(x & y)
     }
 
@@ -1223,7 +1219,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     fn run_jump(&mut self) -> anyhow::Result<(), ProgramError> {
-        let offset = self.interpreter_pop::<1>()?[0];
+        let [offset] = self.interpreter_pop::<1>()?;
 
         let offset: u32 = offset
             .try_into()
@@ -1327,7 +1323,7 @@ impl<F: Field> Interpreter<F> {
         // operation instead of using `mload_queue`.
         let dup_addr_lo = old_len - 1 - n as usize;
         let dup_val = stack_peek(&self.generation_state, n as usize).expect("Stack is big enough.");
-        self.memops.push(InterpreterMemOpKind::Read(
+        self.push_memop(InterpreterMemOpKind::Read(
             dup_val,
             MemoryAddress::new(context, Segment::Stack, dup_addr_lo),
         ));
@@ -1356,7 +1352,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     fn run_set_context(&mut self) -> anyhow::Result<(), ProgramError> {
-        let x = self.interpreter_pop::<1>()?[0];
+        let [x] = self.interpreter_pop::<1>()?;
         let new_ctx = (x >> CONTEXT_SCALING_FACTOR).as_usize();
         let sp_to_save = self.stack_len().into();
 
@@ -1370,8 +1366,7 @@ impl<F: Field> Interpreter<F> {
         self.mstore_queue(old_ctx, Segment::ContextMetadata, sp_field, sp_to_save);
 
         let new_sp = if old_ctx == new_ctx {
-            self.memops
-                .push(InterpreterMemOpKind::Read(sp_to_save, new_sp_addr));
+            self.push_memop(InterpreterMemOpKind::Read(sp_to_save, new_sp_addr));
             sp_to_save.as_usize()
         } else {
             self.mload_queue(new_ctx, Segment::ContextMetadata, sp_field)
@@ -1389,7 +1384,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     fn run_mload_general(&mut self) -> anyhow::Result<(), ProgramError> {
-        let addr = self.interpreter_pop::<1>()?[0];
+        let [addr] = self.interpreter_pop::<1>()?;
         let (context, segment, offset) = unpack_address!(addr);
         let value = self.mload_queue(context, segment, offset);
         assert!(value.bits() <= segment.bit_range());
@@ -1397,8 +1392,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     fn run_mload_32bytes(&mut self) -> anyhow::Result<(), ProgramError> {
-        let vals = self.interpreter_pop::<2>()?;
-        let (addr, len) = (vals[0], vals[1]);
+        let [addr, len] = self.interpreter_pop::<2>()?;
         let (context, segment, offset) = unpack_address!(addr);
         let len = len.as_usize();
         if len > 32 {
@@ -1415,8 +1409,7 @@ impl<F: Field> Interpreter<F> {
         if self.stack_len() != 2 {
             self.generation_state.registers.is_stack_top_read = true;
         }
-        let vals = self.interpreter_pop::<2>()?;
-        let (value, addr) = (vals[0], vals[1]);
+        let [value, addr] = self.interpreter_pop::<2>()?;
         let (context, segment, offset) = unpack_address!(addr);
         self.mstore_queue(context, segment, offset, value);
 
@@ -1424,8 +1417,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     fn run_mstore_32bytes(&mut self, n: u8) -> anyhow::Result<(), ProgramError> {
-        let vals = self.interpreter_pop::<2>()?;
-        let (addr, value) = (vals[0], vals[1]);
+        let [addr, value] = self.interpreter_pop::<2>()?;
         let (context, segment, offset) = unpack_address!(addr);
 
         let mut bytes = vec![0; 32];
@@ -1441,7 +1433,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     fn run_exit_kernel(&mut self) -> anyhow::Result<(), ProgramError> {
-        let kexit_info = self.interpreter_pop::<1>()?[0];
+        let [kexit_info] = self.interpreter_pop::<1>()?;
 
         let kexit_info_u64 = kexit_info.0[0];
         let program_counter = kexit_info_u64 as u32 as usize;
@@ -1478,7 +1470,6 @@ impl<F: Field> Interpreter<F> {
         let new_program_counter = u256_to_usize(handler_addr)?;
 
         let exc_info = U256::from(self.generation_state.registers.program_counter)
-            + (U256::from(self.generation_state.registers.is_kernel as u64) << 32)
             + (U256::from(self.generation_state.registers.gas_used) << 192);
 
         self.interpreter_push_with_write(exc_info)?;

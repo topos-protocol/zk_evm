@@ -20,13 +20,15 @@ use crate::all_stark::{AllStark, NUM_TABLES};
 use crate::cpu::columns::CpuColumnsView;
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::constants::global_metadata::GlobalMetadata;
-use crate::cpu::kernel::interpreter::{self, Interpreter, InterpreterCheckpoint};
+use crate::cpu::kernel::interpreter::{
+    self, Interpreter, InterpreterCheckpoint, InterpreterMemOpKind,
+};
 use crate::generation::state::GenerationState;
 use crate::generation::trie_extractor::{get_receipt_trie, get_state_trie, get_txn_trie};
 use crate::memory::segments::Segment;
 use crate::proof::{BlockHashes, BlockMetadata, ExtraBlockData, PublicValues, TrieRoots};
 use crate::util::{h2u, u256_to_u8, u256_to_usize};
-use crate::witness::memory::{MemoryAddress, MemoryChannel};
+use crate::witness::memory::{MemoryAddress, MemoryChannel, MemoryOp, MemoryOpKind};
 use crate::witness::state::RegistersState;
 use crate::witness::transition::transition;
 
@@ -417,16 +419,20 @@ impl<'a, F: Field> State<'a, F> {
         }
     }
 
-    fn get_gen_checkpoint(ckpt: Checkpoint) -> GenerationStateCheckpoint {
+    fn get_generation_state_checkpoint(ckpt: Checkpoint) -> GenerationStateCheckpoint {
         match ckpt {
             Checkpoint::Generation(checkpoint) => checkpoint,
-            Checkpoint::Interpreter(checkpoint) => panic!(),
+            Checkpoint::Interpreter(checkpoint) => {
+                panic!("Cannot get a GenerationStateCheckpoint from an InterpreterCheckpoint")
+            }
         }
     }
 
-    fn get_interp_checkpoint(ckpt: Checkpoint) -> InterpreterCheckpoint {
+    fn get_interpreter_checkpoint(ckpt: Checkpoint) -> InterpreterCheckpoint {
         match ckpt {
-            Checkpoint::Generation(checkpoint) => panic!(),
+            Checkpoint::Generation(checkpoint) => {
+                panic!("Cannot get an InterpreterCheckpoint from a GenerationStateCheckpoint")
+            }
             Checkpoint::Interpreter(checkpoint) => checkpoint,
         }
     }
@@ -434,9 +440,11 @@ impl<'a, F: Field> State<'a, F> {
     /// Rolls back a `State`.
     pub(crate) fn rollback(&mut self, checkpoint: Checkpoint) {
         match self {
-            Self::Generation(state) => state.rollback(Self::get_gen_checkpoint(checkpoint)),
+            Self::Generation(state) => {
+                state.rollback(Self::get_generation_state_checkpoint(checkpoint))
+            }
             Self::Interpreter(interpreter) => {
-                interpreter.rollback(Self::get_interp_checkpoint(checkpoint))
+                interpreter.rollback(Self::get_interpreter_checkpoint(checkpoint))
             }
         }
     }
@@ -508,35 +516,36 @@ impl<'a, F: Field> State<'a, F> {
 /// Simulates a CPU. It only generates the traces if the `State` is a
 /// `GenerationState`. Otherwise, it simply simulates all ooperations.
 pub(crate) fn run_cpu<F: Field>(
-    all_state: &mut State<F>,
+    any_state: &mut State<F>,
     is_generation: bool,
 ) -> anyhow::Result<()> {
-    let halt_offsets = match all_state {
+    let halt_offsets = match any_state {
         State::Generation(state) => vec![KERNEL.global_labels["halt"]],
         State::Interpreter(interpreter) => interpreter.halt_offsets.clone(),
     };
 
     loop {
-        let pc = all_state.get_registers().program_counter;
+        // If we've reached the kernel's halt routine.
+        let pc = any_state.get_registers().program_counter;
 
-        let halt = all_state.get_registers().is_kernel && halt_offsets.contains(&pc);
+        let halt = any_state.get_registers().is_kernel && halt_offsets.contains(&pc);
 
         if halt {
-            if let Some(halt_context) = all_state.get_halt_context() {
-                if all_state.get_context() == halt_context {
+            if let Some(halt_context) = any_state.get_halt_context() {
+                if any_state.get_context() == halt_context {
                     // Only happens during jumpdest analysis.
                     return Ok(());
                 }
             } else {
                 if is_generation {
-                    log::info!("CPU halted after {} cycles", all_state.get_clock());
+                    log::info!("CPU halted after {} cycles", any_state.get_clock());
                 }
                 return Ok(());
             }
         }
 
-        transition(all_state)?;
-        all_state.incr_interpreter_clock();
+        transition(any_state)?;
+        any_state.incr_interpreter_clock();
     }
 
     Ok(())
@@ -556,6 +565,7 @@ fn simulate_cpu<F: Field>(state: &mut GenerationState<F>) -> anyhow::Result<()> 
     row.stack_len = F::from_canonical_usize(state.registers.stack_len);
 
     loop {
+        // If our trace length is a power of 2, stop.
         state.traces.push_cpu(row);
         row.clock += F::ONE;
         if state.traces.clock().is_power_of_two() {
