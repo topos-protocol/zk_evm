@@ -122,7 +122,9 @@ impl<F: Field> GenerationState<F> {
         let ptr = stack_peek(self, 11 - n).map(u256_to_usize)??;
 
         let f: [U256; 12] = match field {
-            Bn254Base => std::array::from_fn(|i| current_context_peek(self, BnPairing, ptr + i)),
+            Bn254Base => std::array::from_fn(|i| {
+                current_context_peek(self, BnPairing, ptr + i, false, &HashMap::default())
+            }),
             _ => todo!(),
         };
         Ok(field.field_extension_inverse(n, f))
@@ -350,21 +352,26 @@ impl<F: Field> GenerationState<F> {
         let code_len = self.get_code_len(context)?;
         let code = (0..code_len)
             .map(|i| {
-                u256_to_u8(
-                    self.memory
-                        .get(MemoryAddress::new(context, Segment::Code, i)),
-                )
+                u256_to_u8(self.memory.get(
+                    MemoryAddress::new(context, Segment::Code, i),
+                    false,
+                    &HashMap::default(),
+                ))
             })
             .collect::<Result<Vec<u8>, _>>()?;
         Ok(code)
     }
 
     fn get_code_len(&self, context: usize) -> Result<usize, ProgramError> {
-        let code_len = u256_to_usize(self.memory.get(MemoryAddress::new(
-            context,
-            Segment::ContextMetadata,
-            ContextMetadata::CodeSize.unscale(),
-        )))?;
+        let code_len = u256_to_usize(self.memory.get(
+            MemoryAddress::new(
+                context,
+                Segment::ContextMetadata,
+                ContextMetadata::CodeSize.unscale(),
+            ),
+            false,
+            &HashMap::default(),
+        ))?;
         Ok(code_len)
     }
 

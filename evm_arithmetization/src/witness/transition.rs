@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::bail;
 use log::log_enabled;
 use plonky2::field::types::Field;
@@ -29,7 +31,8 @@ fn read_code_memory<F: Field>(state: &mut GenerationState<F>, row: &mut CpuColum
     row.code_context = F::from_canonical_usize(code_context);
 
     let address = MemoryAddress::new(code_context, Segment::Code, state.registers.program_counter);
-    let (opcode, mem_log) = mem_read_code_with_log_and_fill(address, state, row);
+    let (opcode, mem_log) =
+        mem_read_code_with_log_and_fill(address, state, row, false, &HashMap::default());
 
     state.traces.push_memory(mem_log);
 
@@ -264,8 +267,8 @@ fn perform_op<F: Field>(
 ) -> Result<(), ProgramError> {
     // Jumpdest analysis is performed natively by the interpreter and not
     // using the non-deterministic Kernel assembly code.
-    let op = match any_state {
-        State::Generation(state) => op,
+    let (op, is_interpreter, preinitialized_segments, is_jumpdest_analysis) = match any_state {
+        State::Generation(state) => (op, false, HashMap::default(), false),
         State::Interpreter(interpreter) => {
             let op = if interpreter.is_kernel()
                 && interpreter.is_jumpdest_analysis
@@ -281,27 +284,33 @@ fn perform_op<F: Field>(
                     .code()
                     .get(interpreter.generation_state.registers.program_counter)
                     .byte(0);
+
                 decode(interpreter.generation_state.registers, opcode)?
             } else {
                 op
             };
-            op
+            (
+                op,
+                true,
+                interpreter.preinitialized_segments.clone(),
+                interpreter.is_jumpdest_analysis,
+            )
         }
     };
 
-    // #[cfg(debug_assertions)]
-    // if !self.is_kernel() {
-    //     log::debug!(
-    //         "User instruction {:?}, stack = {:?}, ctx = {}",
-    //         op,
-    //         {
-    //             let mut stack = self.stack();
-    //             stack.reverse();
-    //             stack
-    //         },
-    //         self.generation_state.registers.context
-    //     );
-    // }
+    #[cfg(debug_assertions)]
+    if !any_state.get_registers().is_kernel {
+        log::debug!(
+            "User instruction {:?}, stack = {:?}, ctx = {}",
+            op,
+            {
+                let mut stack = any_state.get_stack();
+                stack.reverse();
+                stack
+            },
+            any_state.get_registers().context
+        );
+    }
 
     let state = any_state.get_generation_state();
 
@@ -322,19 +331,25 @@ fn perform_op<F: Field>(
         }
         Operation::BinaryArithmetic(op) => generate_binary_arithmetic_op(op, state, row)?,
         Operation::TernaryArithmetic(op) => generate_ternary_arithmetic_op(op, state, row)?,
-        Operation::KeccakGeneral => generate_keccak_general(state, row)?,
+        Operation::KeccakGeneral => {
+            generate_keccak_general(state, row, is_interpreter, &preinitialized_segments)?
+        }
         Operation::ProverInput => generate_prover_input(state, row)?,
         Operation::Pop => generate_pop(state, row)?,
-        Operation::Jump => generate_jump(state, row)?,
-        Operation::Jumpi => generate_jumpi(state, row)?,
+        Operation::Jump => generate_jump(any_state, row, is_jumpdest_analysis)?,
+        Operation::Jumpi => generate_jumpi(any_state, row, is_jumpdest_analysis)?,
         Operation::Pc => generate_pc(state, row)?,
         Operation::Jumpdest => generate_jumpdest(state, row)?,
         Operation::GetContext => generate_get_context(state, row)?,
         Operation::SetContext => generate_set_context(state, row)?,
-        Operation::Mload32Bytes => generate_mload_32bytes(state, row)?,
+        Operation::Mload32Bytes => {
+            generate_mload_32bytes(state, row, is_interpreter, &preinitialized_segments)?
+        }
         Operation::Mstore32Bytes(n) => generate_mstore_32bytes(n, state, row)?,
         Operation::ExitKernel => generate_exit_kernel(state, row)?,
-        Operation::MloadGeneral => generate_mload_general(state, row)?,
+        Operation::MloadGeneral => {
+            generate_mload_general(state, row, is_interpreter, &preinitialized_segments)?
+        }
         Operation::MstoreGeneral => generate_mstore_general(state, row)?,
     };
     match any_state {
@@ -353,10 +368,6 @@ fn perform_state_op<F: Field>(
     op: Operation,
     row: CpuColumnsView<F>,
 ) -> Result<Operation, ProgramError> {
-    // match any_state {
-    //     State::Generation(state) => perform_op(any_state, op, row)?,
-    //     State::Interpreter(interpreter) => interpreter.run_opcode(opcode, op)?,
-    // }
     perform_op(any_state, op, opcode, row)?;
     any_state.incr_pc(match op {
         Operation::Syscall(_, _, _) | Operation::ExitKernel => 0,
@@ -461,28 +472,6 @@ fn try_perform_instruction<F: Field>(any_state: &mut State<F>) -> Result<Operati
     let is_generation = any_state.is_generation_state();
     let registers = any_state.get_registers();
 
-    // if !is_generation {
-    //     if registers.is_stack_top_read {
-    //         let addr =
-    //             MemoryAddress::new(registers.context, Segment::Stack,
-    // registers.stack_len - 1);
-
-    //         let mem_op = MemoryOp::new(
-    //             GeneralPurpose(0),
-    //             any_state.get_clock(),
-    //             addr,
-    //             MemoryOpKind::Read,
-    //             any_state.get_stack_top(),
-    //         );
-    //         println!("mem op {:?}, stack {:?}", mem_op, any_state.get_stack());
-    //         any_state.push_memop(mem_op);
-    //         any_state.get_mut_registers().is_stack_top_read = false;
-    //     }
-    //     if registers.check_overflow {
-    //         any_state.get_mut_registers().check_overflow = false;
-    //     }
-    // }
-
     let state = any_state.get_mut_state();
     let (mut row, opcode) = base_row(state);
 
@@ -566,19 +555,16 @@ fn handle_error<F: Field>(any_state: &mut State<F>, err: ProgramError) -> anyhow
 
     let checkpoint = any_state.checkpoint();
 
+    let (is_generation, state): (bool, &mut GenerationState<_>) = match any_state {
+        State::Generation(state) => (true, state),
+        State::Interpreter(interpreter) => (false, &mut interpreter.generation_state),
+    };
+    let (row, _) = base_row(state);
+    generate_exception(exc_code, state, row, is_generation);
     match any_state {
-        State::Generation(state) => {
-            let (row, _) = base_row(state);
-            generate_exception(exc_code, state, row)
-                .map_err(|_| anyhow::Error::msg("error handling errored..."))?;
-        }
-        State::Interpreter(interpreter) => {
-            interpreter
-                .run_exception(exc_code)
-                .map_err(|_| anyhow::Error::msg("error handling errored..."))?;
-        }
+        State::Generation(state) => {}
+        State::Interpreter(interpreter) => interpreter.clear_traces(),
     }
-
     any_state.apply_ops(checkpoint);
 
     Ok(())

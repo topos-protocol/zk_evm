@@ -56,7 +56,7 @@ pub(crate) struct Interpreter<F: Field> {
     pub(crate) opcode_count: [usize; 0x100],
     memops: Vec<InterpreterMemOpKind>,
     jumpdest_table: HashMap<usize, BTreeSet<usize>>,
-    preinitialized_segments: HashMap<Segment, MemorySegmentState>,
+    pub(crate) preinitialized_segments: HashMap<Segment, MemorySegmentState>,
     pub(crate) is_jumpdest_analysis: bool,
     pub(crate) clock: usize,
 }
@@ -67,20 +67,6 @@ struct InterpreterRegistersState {
     context: usize,
     registers: RegistersState,
 }
-
-// /// Interpreter state at the last checkpoint: we only need to store
-// /// the state of the registers and the length of the vector of memory
-// /// operations. This data is enough to revert in case of an exception.
-// pub(crate) struct InterpreterCheckpoint {
-//     registers: InterpreterRegistersState,
-//     mem_len: usize,
-// }
-
-// impl InterpreterCheckpoint {
-//     pub(crate) fn get_mem_len(&self) -> usize {
-//         self.mem_len
-//     }
-// }
 
 pub(crate) fn run_interpreter<F: Field>(
     initial_offset: usize,
@@ -372,7 +358,10 @@ impl<F: Field> Interpreter<F> {
             } else {
                 let address =
                     MemoryAddress::new(self.context(), Segment::Stack, self.stack_len() - 1 - i);
-                let val = self.generation_state.memory.get(address);
+                let val =
+                    self.generation_state
+                        .memory
+                        .get(address, true, &self.preinitialized_segments);
                 self.push_memop(InterpreterMemOpKind::Read(val, address));
                 val
             }
@@ -464,7 +453,7 @@ impl<F: Field> Interpreter<F> {
                             assert_eq!(
                                 value,
                                 0.into(),
-                                "value read {:?} at address {:?} should be 0",
+                                "Value {:?} read  at address {:?} should be 0",
                                 value,
                                 address
                             );
@@ -475,47 +464,12 @@ impl<F: Field> Interpreter<F> {
                 MemoryOpKind::Write => self.generation_state.memory.set(address, value),
             }
         }
-        // for memop in self.memops[len..].iter() {
-        //     match *memop {
-        //         InterpreterMemOpKind::Read(val, addr) => {
-        //             if self.generation_state.memory.get_option(addr).is_none() {
-        //                 if !self
-        //                     .preinitialized_segments
-        //                     .contains_key(&Segment::all()[addr.segment])
-        //                 {
-        //                     assert_eq!(
-        //                         val,
-        //                         0.into(),
-        //                         "value read {:?} at address {:?} should be 0",
-        //                         val,
-        //                         addr
-        //                     );
-        //                 }
-        //                 self.generation_state.memory.set(addr, val);
-        //             }
-        //         }
-        //         InterpreterMemOpKind::Write(val, addr) => {
-        //             self.generation_state.memory.set(addr, val)
-        //         }
-        //     }
-        // }
 
         Ok(())
     }
 
-    // /// Returns an `InterpreterCheckpoint` to save the current state of the
-    // /// interpreter.
-    // pub(crate) fn checkpoint(&self) -> InterpreterCheckpoint {
-    //     let registers = InterpreterRegistersState {
-    //         kernel_mode: self.is_kernel(),
-    //         context: self.context(),
-    //         registers: self.generation_state.registers,
-    //     };
-    //     InterpreterCheckpoint {
-    //         registers,
-    //         mem_len: self.memops.len(),
-    //     }
-    // }
+    /// Returns a `GenerationStateCheckpoint` to save the current registers and
+    /// reset memory operations to the empty vector.
     pub(crate) fn checkpoint(&mut self) -> GenerationStateCheckpoint {
         self.generation_state.traces.memory_ops = vec![];
         GenerationStateCheckpoint {
@@ -523,19 +477,6 @@ impl<F: Field> Interpreter<F> {
             traces: self.generation_state.traces.checkpoint(),
         }
     }
-
-    // /// Rolls back to the previous state saved in the `InterpreterCheckpoint`.
-    // pub(crate) fn rollback(&mut self, checkpoint: InterpreterCheckpoint) {
-    //     let InterpreterRegistersState {
-    //         kernel_mode,
-    //         context,
-    //         registers,
-    //     } = checkpoint.registers;
-    //     self.set_is_kernel(kernel_mode);
-    //     self.set_context(context);
-    //     self.generation_state.registers = registers;
-    //     self.memops.truncate(checkpoint.mem_len);
-    // }
 
     /// Generates a segment by returning the state and memory values after
     /// `MAX_SIZE` CPU rows.
@@ -788,10 +729,11 @@ impl<F: Field> Interpreter<F> {
     pub(crate) fn extract_kernel_memory(self, segment: Segment, range: Range<usize>) -> Vec<U256> {
         let mut output: Vec<U256> = Vec::with_capacity(range.end);
         for i in range {
-            let term = self
-                .generation_state
-                .memory
-                .get(MemoryAddress::new(0, segment, i));
+            let term = self.generation_state.memory.get(
+                MemoryAddress::new(0, segment, i),
+                true,
+                &self.preinitialized_segments,
+            );
             output.push(term);
         }
         output
@@ -835,398 +777,12 @@ impl<F: Field> Interpreter<F> {
         result
     }
 
-    pub(crate) fn run_opcode(&mut self, opcode: u8, op: Operation) -> Result<(), ProgramError> {
-        // Jumpdest analysis is performed natively by the interpreter and not
-        // using the non-deterministic Kernel assembly code.
-        let opcode = if self.is_kernel()
-            && self.is_jumpdest_analysis
-            && self.generation_state.registers.program_counter
-                == KERNEL.global_labels["jumpdest_analysis"]
-        {
-            self.generation_state.registers.program_counter =
-                KERNEL.global_labels["jumpdest_analysis_end"];
-            self.generation_state
-                .set_jumpdest_bits(&self.generation_state.get_current_code()?);
-            self.code()
-                .get(self.generation_state.registers.program_counter)
-                .byte(0)
-        } else {
-            opcode
-        };
-
-        #[cfg(debug_assertions)]
-        if !self.is_kernel() {
-            log::debug!(
-                "User instruction {:?}, stack = {:?}, ctx = {}",
-                op,
-                {
-                    let mut stack = self.stack();
-                    stack.reverse();
-                    stack
-                },
-                self.generation_state.registers.context
-            );
-        }
-
-        match opcode {
-            0x00 => self.run_syscall(opcode, 0, false), // "STOP",
-            0x01 => self.run_add(),                     // "ADD",
-            0x02 => self.run_mul(),                     // "MUL",
-            0x03 => self.run_sub(),                     // "SUB",
-            0x04 => self.run_div(),                     // "DIV",
-            0x05 => self.run_syscall(opcode, 2, false), // "SDIV",
-            0x06 => self.run_mod(),                     // "MOD",
-            0x07 => self.run_syscall(opcode, 2, false), // "SMOD",
-            0x08 => self.run_addmod(),                  // "ADDMOD",
-            0x09 => self.run_mulmod(),                  // "MULMOD",
-            0x0a => self.run_syscall(opcode, 2, false), // "EXP",
-            0x0b => self.run_syscall(opcode, 2, false), // "SIGNEXTEND",
-            0x0c => self.run_addfp254(),                // "ADDFP254",
-            0x0d => self.run_mulfp254(),                // "MULFP254",
-            0x0e => self.run_subfp254(),                // "SUBFP254",
-            0x0f => self.run_submod(),                  // "SUBMOD",
-            0x10 => self.run_lt(),                      // "LT",
-            0x11 => self.run_gt(),                      // "GT",
-            0x12 => self.run_syscall(opcode, 2, false), // "SLT",
-            0x13 => self.run_syscall(opcode, 2, false), // "SGT",
-            0x14 => self.run_eq(),                      // "EQ",
-            0x15 => self.run_iszero(),                  // "ISZERO",
-            0x16 => self.run_and(),                     // "AND",
-            0x17 => self.run_or(),                      // "OR",
-            0x18 => self.run_xor(),                     // "XOR",
-            0x19 => self.run_not(),                     // "NOT",
-            0x1a => self.run_byte(),                    // "BYTE",
-            0x1b => self.run_shl(),                     // "SHL",
-            0x1c => self.run_shr(),                     // "SHR",
-            0x1d => self.run_syscall(opcode, 2, false), // "SAR",
-            0x20 => self.run_syscall(opcode, 2, false), // "KECCAK256",
-            0x21 => self.run_keccak_general(),          // "KECCAK_GENERAL",
-            0x30 => self.run_syscall(opcode, 0, true),  // "ADDRESS",
-            0x31 => self.run_syscall(opcode, 1, false), // "BALANCE",
-            0x32 => self.run_syscall(opcode, 0, true),  // "ORIGIN",
-            0x33 => self.run_syscall(opcode, 0, true),  // "CALLER",
-            0x34 => self.run_syscall(opcode, 0, true),  // "CALLVALUE",
-            0x35 => self.run_syscall(opcode, 1, false), // "CALLDATALOAD",
-            0x36 => self.run_syscall(opcode, 0, true),  // "CALLDATASIZE",
-            0x37 => self.run_syscall(opcode, 3, false), // "CALLDATACOPY",
-            0x38 => self.run_syscall(opcode, 0, true),  // "CODESIZE",
-            0x39 => self.run_syscall(opcode, 3, false), // "CODECOPY",
-            0x3a => self.run_syscall(opcode, 0, true),  // "GASPRICE",
-            0x3b => self.run_syscall(opcode, 1, false), // "EXTCODESIZE",
-            0x3c => self.run_syscall(opcode, 4, false), // "EXTCODECOPY",
-            0x3d => self.run_syscall(opcode, 0, true),  // "RETURNDATASIZE",
-            0x3e => self.run_syscall(opcode, 3, false), // "RETURNDATACOPY",
-            0x3f => self.run_syscall(opcode, 1, false), // "EXTCODEHASH",
-            0x40 => self.run_syscall(opcode, 1, false), // "BLOCKHASH",
-            0x41 => self.run_syscall(opcode, 0, true),  // "COINBASE",
-            0x42 => self.run_syscall(opcode, 0, true),  // "TIMESTAMP",
-            0x43 => self.run_syscall(opcode, 0, true),  // "NUMBER",
-            0x44 => self.run_syscall(opcode, 0, true),  // "DIFFICULTY",
-            0x45 => self.run_syscall(opcode, 0, true),  // "GASLIMIT",
-            0x46 => self.run_syscall(opcode, 0, true),  // "CHAINID",
-            0x47 => self.run_syscall(opcode, 0, true),  // SELFABALANCE,
-            0x48 => self.run_syscall(opcode, 0, true),  // "BASEFEE",
-            0x49 => self.run_prover_input(),            // "PROVER_INPUT",
-            0x50 => self.run_pop(),                     // "POP",
-            0x51 => self.run_syscall(opcode, 1, false), // "MLOAD",
-            0x52 => self.run_syscall(opcode, 2, false), // "MSTORE",
-            0x53 => self.run_syscall(opcode, 2, false), // "MSTORE8",
-            0x54 => self.run_syscall(opcode, 1, false), // "SLOAD",
-            0x55 => self.run_syscall(opcode, 2, false), // "SSTORE",
-            0x56 => self.run_jump(),                    // "JUMP",
-            0x57 => self.run_jumpi(),                   // "JUMPI",
-            0x58 => self.run_pc(),                      // "PC",
-            0x59 => self.run_syscall(opcode, 0, true),  // "MSIZE",
-            0x5a => self.run_syscall(opcode, 0, true),  // "GAS",
-            0x5b => self.run_jumpdest(),                // "JUMPDEST",
-            x if (0x5f..0x80).contains(&x) => self.run_push(x - 0x5f), // "PUSH"
-            x if (0x80..0x90).contains(&x) => self.run_dup(x & 0xf), // "DUP"
-            x if (0x90..0xa0).contains(&x) => self.run_swap(x & 0xf), // "SWAP"
-            0xa0 => self.run_syscall(opcode, 2, false), // "LOG0",
-            0xa1 => self.run_syscall(opcode, 3, false), // "LOG1",
-            0xa2 => self.run_syscall(opcode, 4, false), // "LOG2",
-            0xa3 => self.run_syscall(opcode, 5, false), // "LOG3",
-            0xa4 => self.run_syscall(opcode, 6, false), // "LOG4",
-            0xa5 => {
-                log::warn!(
-                    "Kernel panic at {}, stack = {:?}, memory = {:?}",
-                    KERNEL.offset_name(self.generation_state.registers.program_counter),
-                    self.stack(),
-                    self.get_kernel_general_memory()
-                );
-                Err(ProgramError::KernelPanic)
-            } // "PANIC",
-            x if (0xc0..0xe0).contains(&x) => self.run_mstore_32bytes(x - 0xc0 + 1), /* "MSTORE_32BYTES", */
-            0xf0 => self.run_syscall(opcode, 3, false),                              // "CREATE",
-            0xf1 => self.run_syscall(opcode, 7, false),                              // "CALL",
-            0xf2 => self.run_syscall(opcode, 7, false),                              // "CALLCODE",
-            0xf3 => self.run_syscall(opcode, 2, false),                              // "RETURN",
-            0xf4 => self.run_syscall(opcode, 6, false), // "DELEGATECALL",
-            0xf5 => self.run_syscall(opcode, 4, false), // "CREATE2",
-            0xf6 => self.run_get_context(),             // "GET_CONTEXT",
-            0xf7 => self.run_set_context(),             // "SET_CONTEXT",
-            0xf8 => self.run_mload_32bytes(),           // "MLOAD_32BYTES",
-            0xf9 => self.run_exit_kernel(),             // "EXIT_KERNEL",
-            0xfa => self.run_syscall(opcode, 6, false), // "STATICCALL",
-            0xfb => self.run_mload_general(),           // "MLOAD_GENERAL",
-            0xfc => self.run_mstore_general(),          // "MSTORE_GENERAL",
-            0xfd => self.run_syscall(opcode, 2, false), // "REVERT",
-            0xfe => {
-                log::warn!(
-                    "Invalid opcode at {}",
-                    KERNEL.offset_name(self.generation_state.registers.program_counter),
-                );
-                Err(ProgramError::InvalidOpcode)
-            } // "INVALID",
-            0xff => self.run_syscall(opcode, 1, false), // "SELFDESTRUCT",
-            _ => {
-                log::warn!(
-                    "Unrecognized opcode at {}",
-                    KERNEL.offset_name(self.generation_state.registers.program_counter),
-                );
-                Err(ProgramError::InvalidOpcode)
-            }
-        }?;
-
-        #[cfg(debug_assertions)]
-        if self
-            .debug_offsets
-            .contains(&self.generation_state.registers.program_counter)
-        {
-            println!("At {},", self.offset_name());
-        } else if let Some(label) = self.offset_label() {
-            println!("At {label}");
-        }
-
-        self.opcode_count[opcode as usize] += 1;
-
-        Ok(())
-    }
-
     fn offset_name(&self) -> String {
         KERNEL.offset_name(self.generation_state.registers.program_counter)
     }
 
     fn offset_label(&self) -> Option<String> {
         KERNEL.offset_label(self.generation_state.registers.program_counter)
-    }
-
-    fn run_add(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(x.overflowing_add(y).0)
-    }
-
-    fn run_mul(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(x.overflowing_mul(y).0)
-    }
-
-    fn run_sub(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(x.overflowing_sub(y).0)
-    }
-
-    fn run_addfp254(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        // BN_BASE is 254-bit so addition can't overflow
-        self.interpreter_push_no_write((x + y) % BN_BASE)
-    }
-
-    fn run_mulfp254(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(
-            U256::try_from(x.full_mul(y) % BN_BASE)
-                .expect("BN_BASE is 254 bit so the U512 fits in a U256"),
-        )
-    }
-
-    fn run_subfp254(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        // BN_BASE is 254-bit so addition can't overflow
-        self.interpreter_push_no_write((x + (BN_BASE - y)) % BN_BASE)
-    }
-
-    fn run_div(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(if y.is_zero() { U256::zero() } else { x / y })
-    }
-
-    fn run_mod(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(if y.is_zero() { U256::zero() } else { x % y })
-    }
-
-    fn run_addmod(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y, z] = self.interpreter_pop::<3>()?;
-        self.interpreter_push_no_write(if z.is_zero() {
-            z
-        } else {
-            let (x, y, z) = (U512::from(x), U512::from(y), U512::from(z));
-            U256::try_from((x + y) % z)
-                .expect("Inputs are U256 and their sum mod a U256 fits in a U256.")
-        })
-    }
-
-    fn run_submod(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y, z] = self.interpreter_pop::<3>()?;
-        self.interpreter_push_no_write(if z.is_zero() {
-            z
-        } else {
-            let (x, y, z) = (U512::from(x), U512::from(y), U512::from(z));
-            U256::try_from((z + x - y) % z)
-                .expect("Inputs are U256 and their difference mod a U256 fits in a U256.")
-        })
-    }
-
-    fn run_mulmod(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y, z] = self.interpreter_pop::<3>()?;
-        self.interpreter_push_no_write(if z.is_zero() {
-            z
-        } else {
-            U256::try_from(x.full_mul(y) % z)
-                .expect("Inputs are U256 and their product mod a U256 fits in a U256.")
-        })
-    }
-
-    fn run_lt(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.push_bool_no_write(x < y)
-    }
-
-    fn run_gt(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.push_bool_no_write(x > y)
-    }
-
-    fn run_eq(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.push_bool_no_write(x == y)
-    }
-
-    fn run_iszero(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x] = self.interpreter_pop::<1>()?;
-        self.push_bool_no_write(x.is_zero())
-    }
-
-    fn run_and(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(x & y)
-    }
-
-    fn run_or(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(x | y)
-    }
-
-    fn run_xor(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x, y] = self.interpreter_pop::<2>()?;
-        self.interpreter_push_no_write(x ^ y)
-    }
-
-    fn run_not(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x] = self.interpreter_pop::<1>()?;
-        self.interpreter_push_no_write(!x)
-    }
-
-    fn run_byte(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [i, x] = self.interpreter_pop::<2>()?;
-        let result = if i < 32.into() {
-            // Calling `as_usize()` here is safe.
-            x.byte(31 - i.as_usize())
-        } else {
-            0
-        };
-        self.interpreter_push_no_write(result.into())
-    }
-
-    fn run_shl(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [shift, value] = self.interpreter_pop::<2>()?;
-        if shift.bits() <= 32 {
-            self.mload_queue(0, Segment::ShiftTable, shift.low_u32() as usize);
-        }
-        self.interpreter_push_no_write(if shift < U256::from(256usize) {
-            value << shift
-        } else {
-            U256::zero()
-        })
-    }
-
-    fn run_shr(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [shift, value] = self.interpreter_pop::<2>()?;
-        if shift.bits() <= 32 {
-            self.mload_queue(0, Segment::ShiftTable, shift.low_u32() as usize);
-        }
-        self.interpreter_push_no_write(value >> shift)
-    }
-
-    fn run_keccak_general(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [addr, size] = self.interpreter_pop::<2>()?;
-        let (context, segment, offset) = unpack_address!(addr);
-
-        let bytes = (offset..offset + size.as_usize())
-            .map(|i| self.mload_queue(context, segment, i).byte(0))
-            .collect::<Vec<_>>();
-
-        #[cfg(debug_assertions)]
-        println!("Hashing {:?}", &bytes);
-
-        let hash = keccak(bytes);
-        self.interpreter_push_no_write(U256::from_big_endian(hash.as_bytes()))
-    }
-
-    fn run_prover_input(&mut self) -> Result<(), ProgramError> {
-        let pc = self.generation_state.registers.program_counter;
-        let prover_input_fn = &KERNEL.prover_inputs[&pc];
-        let output = self.generation_state.prover_input(prover_input_fn)?;
-        self.interpreter_push_with_write(output)
-    }
-
-    fn run_pop(&mut self) -> anyhow::Result<(), ProgramError> {
-        if self.stack_len() != 1 {
-            self.generation_state.registers.is_stack_top_read = true;
-        }
-        self.interpreter_pop::<1>().map(|_| ())
-    }
-
-    fn run_syscall(
-        &mut self,
-        opcode: u8,
-        stack_values_read: usize,
-        stack_len_increased: bool,
-    ) -> Result<(), ProgramError> {
-        TryInto::<u64>::try_into(self.generation_state.registers.gas_used)
-            .map_err(|_| ProgramError::GasLimitError)?;
-        if self.generation_state.registers.stack_len < stack_values_read {
-            return Err(ProgramError::StackUnderflow);
-        }
-
-        if stack_len_increased
-            && !self.is_kernel()
-            && self.generation_state.registers.stack_len >= MAX_USER_STACK_SIZE
-        {
-            return Err(ProgramError::StackOverflow);
-        };
-
-        let handler_jumptable_addr = KERNEL.global_labels["syscall_jumptable"];
-        let handler_addr = {
-            let offset = handler_jumptable_addr + (opcode as usize) * (BYTES_PER_OFFSET as usize);
-            self.get_memory_segment(Segment::Code)[offset..offset + 3]
-                .iter()
-                .fold(U256::from(0), |acc, &elt| acc * (1 << 8) + elt)
-        };
-
-        let new_program_counter =
-            u256_to_usize(handler_addr).map_err(|_| ProgramError::IntegerTooLarge)?;
-
-        let syscall_info = U256::from(self.generation_state.registers.program_counter + 1)
-            + U256::from((self.is_kernel() as usize) << 32)
-            + (U256::from(self.generation_state.registers.gas_used) << 192);
-
-        self.generation_state.registers.program_counter = new_program_counter;
-
-        self.set_is_kernel(true);
-        self.generation_state.registers.gas_used = 0;
-        self.interpreter_push_with_write(syscall_info)
     }
 
     fn get_jumpdest_bit(&self, offset: usize) -> U256 {
@@ -1236,11 +792,15 @@ impl<F: Field> Interpreter<F> {
         .len()
             > offset
         {
-            self.generation_state.memory.get(MemoryAddress {
-                context: self.context(),
-                segment: Segment::JumpdestBits.unscale(),
-                virt: offset,
-            })
+            self.generation_state.memory.get(
+                MemoryAddress {
+                    context: self.context(),
+                    segment: Segment::JumpdestBits.unscale(),
+                    virt: offset,
+                },
+                true,
+                &self.preinitialized_segments,
+            )
         } else {
             0.into()
         }
@@ -1254,7 +814,7 @@ impl<F: Field> Interpreter<F> {
             .collect()
     }
 
-    fn add_jumpdest_offset(&mut self, offset: usize) {
+    pub(crate) fn add_jumpdest_offset(&mut self, offset: usize) {
         if let Some(jumpdest_table) = self
             .jumpdest_table
             .get_mut(&self.generation_state.registers.context)
@@ -1266,272 +826,6 @@ impl<F: Field> Interpreter<F> {
                 BTreeSet::from([offset]),
             );
         }
-    }
-
-    fn run_jump(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [offset] = self.interpreter_pop::<1>()?;
-
-        let offset: u32 = offset
-            .try_into()
-            .map_err(|_| ProgramError::InvalidJumpDestination)?;
-        let offset = offset as usize;
-
-        if !self.is_kernel() && self.is_jumpdest_analysis {
-            self.add_jumpdest_offset(offset);
-        } else {
-            let jumpdest_bit = self.get_jumpdest_bit(offset);
-
-            // Check that the destination is valid.
-            if !self.is_kernel() && jumpdest_bit != U256::one() {
-                return Err(ProgramError::InvalidJumpDestination);
-            }
-        }
-
-        self.jump_to(offset, false)
-    }
-
-    fn run_jumpi(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [offset, cond] = self.interpreter_pop::<2>()?;
-
-        let offset: u32 = offset
-            .try_into()
-            .map_err(|_| ProgramError::InvalidJumpiDestination)?;
-        let offset = offset as usize;
-
-        if !cond.is_zero() {
-            if !self.is_kernel() && self.is_jumpdest_analysis {
-                self.add_jumpdest_offset(offset);
-            } else {
-                let jumpdest_bit = self.get_jumpdest_bit(offset);
-
-                // Check that the destination is valid.
-                if !self.is_kernel() && jumpdest_bit != U256::one() {
-                    return Err(ProgramError::InvalidJumpiDestination);
-                }
-            }
-            self.jump_to(offset, true)?;
-        } else {
-            self.incr(1);
-        }
-
-        Ok(())
-    }
-
-    fn run_pc(&mut self) -> anyhow::Result<(), ProgramError> {
-        self.interpreter_push_with_write(self.generation_state.registers.program_counter.into())
-    }
-
-    fn run_jumpdest(&mut self) -> anyhow::Result<(), ProgramError> {
-        assert!(!self.is_kernel(), "JUMPDEST is not needed in kernel code");
-        Ok(())
-    }
-
-    fn jump_to(&mut self, offset: usize, is_jumpi: bool) -> anyhow::Result<(), ProgramError> {
-        self.generation_state.registers.program_counter = offset;
-
-        if offset == KERNEL.global_labels["observe_new_address"] {
-            let tip_u256 = stack_peek(&self.generation_state, 0)?;
-            let tip_h256 = H256::from_uint(&tip_u256);
-            let tip_h160 = H160::from(tip_h256);
-            self.generation_state.observe_address(tip_h160);
-        } else if offset == KERNEL.global_labels["observe_new_contract"] {
-            let tip_u256 = stack_peek(&self.generation_state, 0)?;
-            let tip_h256 = H256::from_uint(&tip_u256);
-            self.generation_state.observe_contract(tip_h256)?;
-        }
-
-        if !self.is_kernel() {
-            self.add_jumpdest_offset(offset);
-        }
-
-        Ok(())
-    }
-
-    fn run_push(&mut self, num_bytes: u8) -> anyhow::Result<(), ProgramError> {
-        let x = U256::from_big_endian(&self.code_slice(num_bytes as usize));
-        self.interpreter_push_with_write(x)
-    }
-
-    fn run_dup(&mut self, n: u8) -> anyhow::Result<(), ProgramError> {
-        let old_len = self.stack_len();
-        if !self.is_kernel() && old_len >= MAX_USER_STACK_SIZE {
-            return Err(ProgramError::StackOverflow);
-        }
-        if n as usize >= self.stack_len() {
-            return Err(ProgramError::StackUnderflow);
-        }
-
-        // We first write the old top in memory.
-        let top = self.stack_top().expect("Stack is not empty.");
-        let context = self.context();
-        let old_top_addr = old_len - 1;
-        self.mstore_queue(context, Segment::Stack, old_top_addr, top);
-
-        // Then we read the value to dup in memory.
-        // The value we want to queue_read might not be written in memory yet (it's
-        // `stack_top` if n = 0). This is why we will manually craft the memory
-        // operation instead of using `mload_queue`.
-        let dup_addr_lo = old_len - 1 - n as usize;
-        let dup_val = stack_peek(&self.generation_state, n as usize).expect("Stack is big enough.");
-        self.push_memop(InterpreterMemOpKind::Read(
-            dup_val,
-            MemoryAddress::new(context, Segment::Stack, dup_addr_lo),
-        ));
-
-        // Finally we push the dup value.
-        self.interpreter_push_no_write(dup_val);
-        Ok(())
-    }
-
-    fn run_swap(&mut self, n: u8) -> anyhow::Result<(), ProgramError> {
-        let other_addr_lo = self
-            .stack_len()
-            .checked_sub(2 + (n as usize))
-            .ok_or(ProgramError::StackUnderflow)?;
-        let [old_top] = self.interpreter_pop::<1>()?;
-
-        let other_value = self.mload_queue(self.context(), Segment::Stack, other_addr_lo);
-        self.mstore_queue(self.context(), Segment::Stack, other_addr_lo, old_top);
-
-        self.interpreter_push_no_write(other_value);
-        Ok(())
-    }
-
-    fn run_get_context(&mut self) -> anyhow::Result<(), ProgramError> {
-        self.interpreter_push_with_write(U256::from(self.context()) << CONTEXT_SCALING_FACTOR)
-    }
-
-    fn run_set_context(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [x] = self.interpreter_pop::<1>()?;
-        let new_ctx = (x >> CONTEXT_SCALING_FACTOR).as_usize();
-        let sp_to_save = self.stack_len().into();
-
-        let old_ctx = self.context();
-
-        let sp_field = ContextMetadata::StackSize.unscale();
-
-        let old_sp_addr = MemoryAddress::new(old_ctx, Segment::ContextMetadata, sp_field);
-        let new_sp_addr = MemoryAddress::new(new_ctx, Segment::ContextMetadata, sp_field);
-
-        self.mstore_queue(old_ctx, Segment::ContextMetadata, sp_field, sp_to_save);
-
-        let new_sp = if old_ctx == new_ctx {
-            self.push_memop(InterpreterMemOpKind::Read(sp_to_save, new_sp_addr));
-            sp_to_save.as_usize()
-        } else {
-            self.mload_queue(new_ctx, Segment::ContextMetadata, sp_field)
-                .as_usize()
-        };
-
-        if new_sp > 0 {
-            let new_stack_top = self.mload_queue(new_ctx, Segment::Stack, new_sp - 1);
-            self.generation_state.registers.stack_top = new_stack_top;
-        }
-        self.set_context(new_ctx);
-        self.generation_state.registers.stack_len = new_sp;
-
-        Ok(())
-    }
-
-    fn run_mload_general(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [addr] = self.interpreter_pop::<1>()?;
-        let (context, segment, offset) = unpack_address!(addr);
-        let value = self.mload_queue(context, segment, offset);
-        assert!(value.bits() <= segment.bit_range());
-        self.interpreter_push_no_write(value)
-    }
-
-    fn run_mload_32bytes(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [addr, len] = self.interpreter_pop::<2>()?;
-        let (context, segment, offset) = unpack_address!(addr);
-        let len = len.as_usize();
-        if len > 32 {
-            return Err(ProgramError::IntegerTooLarge);
-        }
-        let bytes: Vec<u8> = (0..len)
-            .map(|i| self.mload_queue(context, segment, offset + i).low_u32() as u8)
-            .collect();
-        let value = U256::from_big_endian(&bytes);
-        self.interpreter_push_no_write(value)
-    }
-
-    fn run_mstore_general(&mut self) -> anyhow::Result<(), ProgramError> {
-        if self.stack_len() != 2 {
-            self.generation_state.registers.is_stack_top_read = true;
-        }
-        let [value, addr] = self.interpreter_pop::<2>()?;
-        let (context, segment, offset) = unpack_address!(addr);
-        self.mstore_queue(context, segment, offset, value);
-
-        Ok(())
-    }
-
-    fn run_mstore_32bytes(&mut self, n: u8) -> anyhow::Result<(), ProgramError> {
-        let [addr, value] = self.interpreter_pop::<2>()?;
-        let (context, segment, offset) = unpack_address!(addr);
-
-        let mut bytes = vec![0; 32];
-        value.to_little_endian(&mut bytes);
-        bytes.resize(n as usize, 0);
-        bytes.reverse();
-
-        for (i, &byte) in bytes.iter().enumerate() {
-            self.mstore_queue(context, segment, offset + i, byte.into());
-        }
-
-        self.interpreter_push_no_write(addr + U256::from(n))
-    }
-
-    fn run_exit_kernel(&mut self) -> anyhow::Result<(), ProgramError> {
-        let [kexit_info] = self.interpreter_pop::<1>()?;
-
-        let kexit_info_u64 = kexit_info.0[0];
-        let program_counter = kexit_info_u64 as u32 as usize;
-        let is_kernel_mode_val = (kexit_info_u64 >> 32) as u32;
-        assert!(is_kernel_mode_val == 0 || is_kernel_mode_val == 1);
-        let is_kernel_mode = is_kernel_mode_val != 0;
-        let gas_used_val = kexit_info.0[3];
-        TryInto::<u64>::try_into(gas_used_val).map_err(|_| ProgramError::GasLimitError)?;
-
-        self.generation_state.registers.program_counter = program_counter;
-
-        self.set_is_kernel(is_kernel_mode);
-        self.generation_state.registers.gas_used = gas_used_val;
-
-        Ok(())
-    }
-
-    pub(crate) fn run_exception(&mut self, exc_code: u8) -> Result<(), ProgramError> {
-        let disallowed_len = MAX_USER_STACK_SIZE + 1;
-
-        if self.stack_len() == disallowed_len {
-            // This is a stack overflow that should have been caught earlier.
-            return Err(ProgramError::StackOverflow);
-        };
-        let handler_jumptable_addr = KERNEL.global_labels["exception_jumptable"];
-        let handler_addr = {
-            let offset = handler_jumptable_addr + (exc_code as usize) * (BYTES_PER_OFFSET as usize);
-            assert_eq!(BYTES_PER_OFFSET, 3, "Code below assumes 3 bytes per offset");
-            self.get_memory_segment(Segment::Code)[offset..offset + 3]
-                .iter()
-                .fold(U256::from(0), |acc, &elt| acc * 256 + elt)
-        };
-
-        let new_program_counter = u256_to_usize(handler_addr)?;
-
-        let exc_info = U256::from(self.generation_state.registers.program_counter)
-            + (U256::from(self.generation_state.registers.gas_used) << 192);
-
-        self.interpreter_push_with_write(exc_info)?;
-        // Set registers before pushing to the stack; in particular, we need to set
-        // kernel mode so we can't incorrectly trigger a stack overflow.
-        // However, note that we have to do it _after_ we make `exc_info`, which
-        // should contain the old values.
-        self.generation_state.registers.program_counter = new_program_counter;
-        self.set_is_kernel(true);
-        self.generation_state.registers.gas_used = 0;
-
-        Ok(())
     }
 
     pub(crate) const fn stack_len(&self) -> usize {

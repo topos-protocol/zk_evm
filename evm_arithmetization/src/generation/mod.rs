@@ -372,8 +372,12 @@ impl<'a, F: Field> State<'a, F> {
     /// Returns the value stored at address `address` in a `State`.
     pub(crate) fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
         match self {
-            Self::Generation(state) => state.memory.get(address),
-            Self::Interpreter(interpreter) => interpreter.generation_state.memory.get(address),
+            Self::Generation(state) => state.memory.get(address, false, &HashMap::default()),
+            Self::Interpreter(interpreter) => interpreter.generation_state.memory.get(
+                address,
+                true,
+                &interpreter.preinitialized_segments,
+            ),
         }
     }
 
