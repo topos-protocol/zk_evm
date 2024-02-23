@@ -1,26 +1,217 @@
 use std::collections::HashMap;
 
+use anyhow::bail;
 use ethereum_types::{Address, BigEndianHash, H160, H256, U256};
 use keccak_hash::keccak;
+use log::log_enabled;
 use plonky2::field::types::Field;
 
 use super::mpt::{load_all_mpts, TrieRootPtrs};
 use super::TrieInputs;
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::constants::context_metadata::ContextMetadata;
+use crate::cpu::membus::NUM_GP_CHANNELS;
+use crate::cpu::stack::MAX_USER_STACK_SIZE;
 use crate::generation::rlp::all_rlp_prover_inputs_reversed;
+use crate::generation::CpuColumnsView;
 use crate::generation::GenerationInputs;
 use crate::memory::segments::Segment;
 use crate::util::u256_to_usize;
 use crate::witness::errors::ProgramError;
-use crate::witness::memory::{MemoryAddress, MemoryState};
+use crate::witness::memory::MemoryChannel::GeneralPurpose;
+use crate::witness::memory::MemoryOpKind;
+use crate::witness::memory::{MemoryAddress, MemoryOp, MemoryState};
+use crate::witness::operation::{generate_exception, Operation};
 use crate::witness::state::RegistersState;
 use crate::witness::traces::{TraceCheckpoint, Traces};
-use crate::witness::util::stack_peek;
+use crate::witness::transition::{
+    decode, fill_op_flag, get_op_special_length, log_kernel_instruction, might_overflow_op,
+    perform_state_op, read_code_memory, Transition,
+};
+use crate::witness::util::{
+    fill_channel_with_value, mem_read_gp_with_log_and_fill, stack_peek, stack_pop_with_log_and_fill,
+};
 
-pub(crate) struct GenerationStateCheckpoint {
-    pub(crate) registers: RegistersState,
-    pub(crate) traces: TraceCheckpoint,
+/// A State is either an `Interpreter` (used for tests and jumpdest analysis) or
+/// a `GenerationState`.
+pub(crate) trait State<F: Field> {
+    /// Returns a `State`'s `Checkpoint`.
+    fn checkpoint(&mut self) -> GenerationStateCheckpoint;
+
+    /// Increments the `gas_used` register by a value `n`.
+    fn incr_gas(&mut self, n: u64);
+
+    /// Increments the `program_counter` register by a value `n`.
+    fn incr_pc(&mut self, n: usize);
+
+    /// Returns a `State`'s registers.
+    fn get_registers(&self) -> RegistersState;
+
+    /// Returns a `State`'s mutable registers.
+    fn get_mut_registers(&mut self) -> &mut RegistersState;
+
+    /// Returns the value stored at address `address` in a `State`.
+    fn get_from_memory(&mut self, address: MemoryAddress) -> U256;
+
+    /// Returns a mutable `GenerationState` from a `State`.
+    fn get_mut_generation_state(&mut self) -> &mut GenerationState<F>;
+
+    /// Returns true if a `State` is a `GenerationState` and false otherwise.
+    fn is_generation_state(&mut self) -> bool;
+
+    /// Increments the clock of an `Interpreter`'s clock.
+    fn incr_interpreter_clock(&mut self);
+
+    /// Returns the value of a `State`'s clock.
+    fn get_clock(&mut self) -> usize;
+
+    /// Rolls back a `State`.
+    fn rollback(&mut self, checkpoint: GenerationStateCheckpoint);
+
+    /// Returns a `State`'s stack.
+    fn get_stack(&mut self) -> Vec<U256>;
+
+    /// Returns the current context.
+    fn get_context(&mut self) -> usize;
+
+    fn get_halt_context(&mut self) -> Option<usize>;
+
+    /// Returns the content of a the `KernelGeneral` segment of a `State`.
+    fn mem_get_kernel_content(&self) -> Vec<Option<U256>>;
+
+    /// Applies a `State`'s operations since a checkpoint.
+    fn apply_ops(&mut self, checkpoint: GenerationStateCheckpoint);
+
+    /// Return the offsets at which execution must halt
+    fn get_halt_offsets(&self) -> Vec<usize>;
+
+    /// Simulates a CPU. It only generates the traces if the `State` is a
+    /// `GenerationState`. Otherwise, it simply simulates all ooperations.
+    fn run_cpu(&mut self, is_generation: bool) -> anyhow::Result<()> {
+        let halt_offsets = self.get_halt_offsets();
+
+        loop {
+            // If we've reached the kernel's halt routine.
+            let registers = self.get_registers();
+            let pc = registers.program_counter;
+
+            let halt = registers.is_kernel && halt_offsets.contains(&pc);
+
+            if halt {
+                if let Some(halt_context) = self.get_halt_context() {
+                    if registers.context == halt_context {
+                        // Only happens during jumpdest analysis.
+                        return Ok(());
+                    }
+                } else {
+                    if is_generation {
+                        log::info!("CPU halted after {} cycles", self.get_clock());
+                    }
+                    return Ok(());
+                }
+            }
+
+            self.transition()?;
+            self.incr_interpreter_clock();
+        }
+
+        Ok(())
+    }
+
+    fn handle_error(&mut self, err: ProgramError) -> anyhow::Result<()> {
+        let exc_code: u8 = match err {
+            ProgramError::OutOfGas => 0,
+            ProgramError::InvalidOpcode => 1,
+            ProgramError::StackUnderflow => 2,
+            ProgramError::InvalidJumpDestination => 3,
+            ProgramError::InvalidJumpiDestination => 4,
+            ProgramError::StackOverflow => 5,
+            _ => bail!("TODO: figure out what to do with this..."),
+        };
+
+        let (checkpoint, is_generation) = (self.checkpoint(), self.is_generation_state());
+
+        let (row, _) = self.base_row();
+        generate_exception(
+            exc_code,
+            self.get_mut_generation_state(),
+            row,
+            is_generation,
+        );
+
+        // We only clear traces for the interpreter
+        if !self.is_generation_state() {
+            self.clear_traces()
+        }
+
+        self.apply_ops(checkpoint);
+
+        Ok(())
+    }
+
+    fn transition(&mut self) -> anyhow::Result<()> {
+        let checkpoint = self.checkpoint();
+        let result = self.try_perform_instruction();
+
+        match result {
+            Ok(op) => {
+                self.apply_ops(checkpoint);
+
+                if might_overflow_op(op) {
+                    self.get_mut_registers().check_overflow = true;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                if self.get_registers().is_kernel {
+                    let offset_name = KERNEL.offset_name(self.get_registers().program_counter);
+                    bail!(
+                        "{:?} in kernel at pc={}, stack={:?}, memory={:?}",
+                        e,
+                        offset_name,
+                        self.get_stack(),
+                        self.mem_get_kernel_content(),
+                    );
+                }
+                self.rollback(checkpoint);
+                self.handle_error(e)
+            }
+        }
+    }
+
+    /// Clears all traces from `GenerationState` except for
+    /// memory_ops, which are necessary to apply operations.
+    fn clear_traces(&mut self) {
+        let generation_state = self.get_mut_generation_state();
+        generation_state.traces.arithmetic_ops = vec![];
+        generation_state.traces.arithmetic_ops = vec![];
+        generation_state.traces.byte_packing_ops = vec![];
+        generation_state.traces.cpu = vec![];
+        generation_state.traces.logic_ops = vec![];
+        generation_state.traces.keccak_inputs = vec![];
+        generation_state.traces.keccak_sponge_ops = vec![];
+    }
+
+    fn try_perform_instruction(&mut self) -> Result<Operation, ProgramError>;
+
+    /// Row that has the correct values for system registers and the code
+    /// channel, but is otherwise blank. It fulfills the constraints that
+    /// are common to successful operations and the exception operation. It
+    /// also returns the opcode
+    fn base_row(&mut self) -> (CpuColumnsView<F>, u8) {
+        let generation_state = self.get_mut_generation_state();
+        let mut row: CpuColumnsView<F> = CpuColumnsView::default();
+        row.clock = F::from_canonical_usize(generation_state.traces.clock());
+        row.context = F::from_canonical_usize(generation_state.registers.context);
+        row.program_counter = F::from_canonical_usize(generation_state.registers.program_counter);
+        row.is_kernel_mode = F::from_bool(generation_state.registers.is_kernel);
+        row.gas = F::from_canonical_u64(generation_state.registers.gas_used);
+        row.stack_len = F::from_canonical_usize(generation_state.registers.stack_len);
+        fill_channel_with_value(&mut row, 0, generation_state.registers.stack_top);
+
+        let opcode = read_code_memory(generation_state, &mut row);
+        (row, opcode)
+    }
 }
 
 #[derive(Debug)]
@@ -161,13 +352,6 @@ impl<F: Field> GenerationState<F> {
         Ok(())
     }
 
-    pub(crate) fn checkpoint(&self) -> GenerationStateCheckpoint {
-        GenerationStateCheckpoint {
-            registers: self.registers,
-            traces: self.traces.checkpoint(),
-        }
-    }
-
     pub(crate) fn rollback(&mut self, checkpoint: GenerationStateCheckpoint) {
         self.registers = checkpoint.registers;
         self.traces.rollback(checkpoint.traces);
@@ -199,6 +383,195 @@ impl<F: Field> GenerationState<F> {
             jumpdest_table: None,
         }
     }
+}
+
+impl<F: Field> State<F> for GenerationState<F> {
+    fn checkpoint(&mut self) -> GenerationStateCheckpoint {
+        GenerationStateCheckpoint {
+            registers: self.registers,
+            traces: self.traces.checkpoint(),
+        }
+    }
+
+    /// Increments the `gas_used` register by a value `n`.
+    fn incr_gas(&mut self, n: u64) {
+        self.registers.gas_used += n;
+    }
+
+    /// Increments the `program_counter` register by a value `n`.
+    fn incr_pc(&mut self, n: usize) {
+        self.registers.program_counter += n;
+    }
+
+    /// Returns a `State`'s registers.
+    fn get_registers(&self) -> RegistersState {
+        self.registers
+    }
+
+    /// Returns a `State`'s mutable registers.
+    fn get_mut_registers(&mut self) -> &mut RegistersState {
+        &mut self.registers
+    }
+
+    /// Returns the value stored at address `address` in a `State`.
+    fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
+        self.memory.get(address, false, &HashMap::default())
+    }
+
+    /// Returns a mutable `GenerationState` from a `State`.
+    fn get_mut_generation_state(&mut self) -> &mut GenerationState<F> {
+        self
+    }
+
+    /// Returns true if a `State` is a `GenerationState` and false otherwise.
+    fn is_generation_state(&mut self) -> bool {
+        true
+    }
+
+    /// Increments the clock of an `Interpreter`'s clock.
+    fn incr_interpreter_clock(&mut self) {}
+
+    /// Returns the value of a `State`'s clock.
+    fn get_clock(&mut self) -> usize {
+        self.traces.clock()
+    }
+
+    /// Rolls back a `State`.
+    fn rollback(&mut self, checkpoint: GenerationStateCheckpoint) {
+        self.rollback(checkpoint)
+    }
+
+    /// Returns a `State`'s stack.
+    fn get_stack(&mut self) -> Vec<U256> {
+        self.stack()
+    }
+
+    fn get_context(&mut self) -> usize {
+        self.registers.context
+    }
+
+    fn get_halt_context(&mut self) -> Option<usize> {
+        None
+    }
+
+    /// Returns the content of a the `KernelGeneral` segment of a `State`.
+    fn mem_get_kernel_content(&self) -> Vec<Option<U256>> {
+        self.memory.contexts[0].segments[Segment::KernelGeneral.unscale()]
+            .content
+            .clone()
+    }
+
+    /// Applies a `State`'s operations since a checkpoint.
+    fn apply_ops(&mut self, checkpoint: GenerationStateCheckpoint) {
+        self.memory
+            .apply_ops(self.traces.mem_ops_since(checkpoint.traces))
+    }
+
+    fn get_halt_offsets(&self) -> Vec<usize> {
+        vec![KERNEL.global_labels["halt"]]
+    }
+
+    fn try_perform_instruction(&mut self) -> Result<Operation, ProgramError> {
+        let registers = self.registers;
+        let (mut row, opcode) = self.base_row();
+
+        let op = decode(registers, opcode)?;
+
+        if registers.is_kernel {
+            log_kernel_instruction(self, op);
+        } else {
+            log::debug!("User instruction: {:?}", op);
+        }
+        fill_op_flag(op, &mut row);
+
+        self.fill_stack_fields(&mut row)?;
+
+        // Might write in general CPU columns when it shouldn't, but the correct values
+        // will overwrite these ones during the op generation.
+        if let Some(special_len) = get_op_special_length(op) {
+            let special_len_f = F::from_canonical_usize(special_len);
+            let diff = row.stack_len - special_len_f;
+            if let Some(inv) = diff.try_inverse() {
+                row.general.stack_mut().stack_inv = inv;
+                row.general.stack_mut().stack_inv_aux = F::ONE;
+                self.registers.is_stack_top_read = true;
+            } else if (self.stack().len() != special_len) {
+                // If the `State` is an interpreter, we cannot rely on the row to carry out the
+                // check.
+                self.registers.is_stack_top_read = true;
+            }
+        } else if let Some(inv) = row.stack_len.try_inverse() {
+            row.general.stack_mut().stack_inv = inv;
+            row.general.stack_mut().stack_inv_aux = F::ONE;
+        }
+
+        perform_state_op(self, opcode, op, row)
+    }
+}
+
+impl<F: Field> Transition<F> for GenerationState<F> {
+    fn skip_if_necessary(&mut self, op: Operation) -> Result<Operation, ProgramError> {
+        Ok(op)
+    }
+
+    fn get_preinitialized_segments(
+        &self,
+    ) -> HashMap<Segment, crate::witness::memory::MemorySegmentState> {
+        HashMap::default()
+    }
+
+    fn generate_jumpdest_analysis(&mut self, dst: usize) -> bool {
+        false
+    }
+
+    fn fill_stack_fields(&mut self, row: &mut CpuColumnsView<F>) -> Result<(), ProgramError> {
+        if self.registers.is_stack_top_read {
+            let channel = &mut row.mem_channels[0];
+            channel.used = F::ONE;
+            channel.is_read = F::ONE;
+            channel.addr_context = F::from_canonical_usize(self.registers.context);
+            channel.addr_segment = F::from_canonical_usize(Segment::Stack.unscale());
+            channel.addr_virtual = F::from_canonical_usize(self.registers.stack_len - 1);
+
+            let address = MemoryAddress::new(
+                self.registers.context,
+                Segment::Stack,
+                self.registers.stack_len - 1,
+            );
+
+            let mem_op = MemoryOp::new(
+                GeneralPurpose(0),
+                self.traces.clock(),
+                address,
+                MemoryOpKind::Read,
+                self.registers.stack_top,
+            );
+            self.traces.push_memory(mem_op);
+        }
+        self.registers.is_stack_top_read = false;
+
+        if self.registers.check_overflow {
+            if self.registers.is_kernel {
+                row.general.stack_mut().stack_len_bounds_aux = F::ZERO;
+            } else {
+                let clock = self.traces.clock();
+                let last_row = &mut self.traces.cpu[clock - 1];
+                let disallowed_len = F::from_canonical_usize(MAX_USER_STACK_SIZE + 1);
+                let diff = row.stack_len - disallowed_len;
+                if let Some(inv) = diff.try_inverse() {
+                    last_row.general.stack_mut().stack_len_bounds_aux = inv;
+                }
+            }
+        }
+        self.registers.check_overflow = false;
+
+        Ok(())
+    }
+}
+
+pub(crate) struct GenerationStateCheckpoint {
+    pub(crate) registers: RegistersState,
+    pub(crate) traces: TraceCheckpoint,
 }
 
 /// Withdrawals prover input array is of the form `[addr0, amount0, ..., addrN,

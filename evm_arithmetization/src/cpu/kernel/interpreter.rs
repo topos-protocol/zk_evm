@@ -13,13 +13,13 @@ use plonky2::field::types::Field;
 
 use super::assembler::BYTES_PER_OFFSET;
 use super::utils::u256_from_bool;
-use crate::cpu::halt;
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::assembler::Kernel;
 use crate::cpu::kernel::constants::context_metadata::ContextMetadata;
 use crate::cpu::kernel::constants::global_metadata::GlobalMetadata;
 use crate::cpu::kernel::constants::txn_fields::NormalizedTxnField;
 use crate::cpu::stack::MAX_USER_STACK_SIZE;
+use crate::cpu::{decode, halt};
 use crate::extension_tower::BN_BASE;
 use crate::generation::mpt::load_all_mpts;
 use crate::generation::prover_input::ProverInputFn;
@@ -27,7 +27,7 @@ use crate::generation::rlp::all_rlp_prover_inputs_reversed;
 use crate::generation::state::{
     self, all_withdrawals_prover_inputs_reversed, GenerationState, GenerationStateCheckpoint,
 };
-use crate::generation::{run_cpu, GenerationInputs, State};
+use crate::generation::{state::State, GenerationInputs};
 use crate::memory::segments::{Segment, SEGMENT_SCALING_FACTOR};
 use crate::util::{h2u, u256_to_u8, u256_to_usize};
 use crate::witness::errors::{ProgramError, ProverInputError};
@@ -37,6 +37,10 @@ use crate::witness::memory::{
 };
 use crate::witness::operation::{Operation, CONTEXT_SCALING_FACTOR};
 use crate::witness::state::RegistersState;
+use crate::witness::transition::{
+    decode, fill_op_flag, get_op_special_length, log_kernel_instruction, perform_state_op,
+    Transition,
+};
 use crate::witness::util::{push_no_write, stack_peek};
 use crate::{arithmetic, logic};
 
@@ -375,19 +379,8 @@ impl<F: Field> Interpreter<F> {
         Ok(())
     }
 
-    /// Returns a `GenerationStateCheckpoint` to save the current registers and
-    /// reset memory operations to the empty vector.
-    pub(crate) fn checkpoint(&mut self) -> GenerationStateCheckpoint {
-        self.generation_state.traces.memory_ops = vec![];
-        GenerationStateCheckpoint {
-            registers: self.generation_state.registers,
-            traces: self.generation_state.traces.checkpoint(),
-        }
-    }
-
     pub(crate) fn run(&mut self) -> Result<(), anyhow::Error> {
-        let mut state = State::Interpreter(self);
-        run_cpu(&mut state, false)?;
+        self.run_cpu(false)?;
 
         #[cfg(debug_assertions)]
         {
@@ -551,18 +544,6 @@ impl<F: Field> Interpreter<F> {
         self.set_memory_segment_bytes(Segment::RlpRaw, rlp)
     }
 
-    /// Clears all traces of the interpreter's `GenerationState` except for
-    /// memory_ops, which are necessary to apply operations.
-    pub(crate) fn clear_traces(&mut self) {
-        self.generation_state.traces.arithmetic_ops = vec![];
-        self.generation_state.traces.arithmetic_ops = vec![];
-        self.generation_state.traces.byte_packing_ops = vec![];
-        self.generation_state.traces.cpu = vec![];
-        self.generation_state.traces.logic_ops = vec![];
-        self.generation_state.traces.keccak_inputs = vec![];
-        self.generation_state.traces.keccak_sponge_ops = vec![];
-    }
-
     pub(crate) fn set_code(&mut self, context: usize, code: Vec<u8>) {
         assert_ne!(context, 0, "Can't modify kernel code.");
         while self.generation_state.memory.contexts.len() <= context {
@@ -627,6 +608,7 @@ impl<F: Field> Interpreter<F> {
             }
         }
     }
+
     fn stack_segment_mut(&mut self) -> &mut Vec<Option<U256>> {
         let context = self.context();
         &mut self.generation_state.memory.contexts[context].segments[Segment::Stack.unscale()]
@@ -769,6 +751,167 @@ impl<F: Field> Interpreter<F> {
             MemoryAddress::new(0, Segment::RlpRaw, 0xFFFFFFFF),
             128.into(),
         )
+    }
+}
+
+impl<F: Field> State<F> for Interpreter<F> {
+    //// Returns a `GenerationStateCheckpoint` to save the current registers and
+    /// reset memory operations to the empty vector.
+    fn checkpoint(&mut self) -> GenerationStateCheckpoint {
+        self.generation_state.traces.memory_ops = vec![];
+        GenerationStateCheckpoint {
+            registers: self.generation_state.registers,
+            traces: self.generation_state.traces.checkpoint(),
+        }
+    }
+
+    fn incr_gas(&mut self, n: u64) {
+        self.generation_state.registers.gas_used += n;
+    }
+
+    fn incr_pc(&mut self, n: usize) {
+        self.generation_state.registers.program_counter += n;
+    }
+
+    fn get_registers(&self) -> RegistersState {
+        self.generation_state.registers
+    }
+
+    fn get_mut_registers(&mut self) -> &mut RegistersState {
+        &mut self.generation_state.registers
+    }
+
+    fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
+        self.generation_state
+            .memory
+            .get(address, true, &self.preinitialized_segments)
+    }
+
+    fn get_mut_generation_state(&mut self) -> &mut GenerationState<F> {
+        &mut self.generation_state
+    }
+
+    fn is_generation_state(&mut self) -> bool {
+        false
+    }
+
+    fn incr_interpreter_clock(&mut self) {
+        self.clock += 1
+    }
+
+    fn get_clock(&mut self) -> usize {
+        self.clock
+    }
+
+    fn rollback(&mut self, checkpoint: GenerationStateCheckpoint) {
+        self.generation_state.rollback(checkpoint)
+    }
+
+    fn get_context(&mut self) -> usize {
+        self.context()
+    }
+
+    fn get_halt_context(&mut self) -> Option<usize> {
+        self.halt_context
+    }
+
+    fn mem_get_kernel_content(&self) -> Vec<Option<U256>> {
+        self.generation_state.memory.contexts[0].segments[Segment::KernelGeneral.unscale()]
+            .content
+            .clone()
+    }
+
+    fn apply_ops(&mut self, checkpoint: GenerationStateCheckpoint) {
+        self.apply_memops();
+    }
+
+    fn get_stack(&mut self) -> Vec<U256> {
+        self.stack().clone()
+    }
+
+    fn get_halt_offsets(&self) -> Vec<usize> {
+        self.halt_offsets.clone()
+    }
+
+    fn try_perform_instruction(&mut self) -> Result<Operation, ProgramError> {
+        let registers = self.generation_state.registers;
+        let (mut row, opcode) = self.base_row();
+
+        let op = decode(registers, opcode)?;
+
+        fill_op_flag(op, &mut row);
+
+        self.fill_stack_fields(&mut row)?;
+
+        let generation_state = self.get_mut_generation_state();
+        if registers.is_kernel {
+            log_kernel_instruction(generation_state, op);
+        } else {
+            log::debug!("User instruction: {:?}", op);
+        }
+
+        // Might write in general CPU columns when it shouldn't, but the correct values
+        // will overwrite these ones during the op generation.
+        if let Some(special_len) = get_op_special_length(op) {
+            let special_len_f = F::from_canonical_usize(special_len);
+            let diff = row.stack_len - special_len_f;
+            if (generation_state.stack().len() != special_len) {
+                // If the `State` is an interpreter, we cannot rely on the row to carry out the
+                // check.
+                generation_state.registers.is_stack_top_read = true;
+            }
+        } else if let Some(inv) = row.stack_len.try_inverse() {
+            row.general.stack_mut().stack_inv = inv;
+            row.general.stack_mut().stack_inv_aux = F::ONE;
+        }
+
+        perform_state_op(self, opcode, op, row)
+    }
+}
+
+impl<F: Field> Transition<F> for Interpreter<F> {
+    fn generate_jumpdest_analysis(&mut self, dst: usize) -> bool {
+        if self.is_jumpdest_analysis && !self.generation_state.registers.is_kernel {
+            self.add_jumpdest_offset(dst as usize);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn skip_if_necessary(&mut self, op: Operation) -> Result<Operation, ProgramError> {
+        if self.is_kernel()
+            && self.is_jumpdest_analysis
+            && self.generation_state.registers.program_counter
+                == KERNEL.global_labels["jumpdest_analysis"]
+        {
+            self.generation_state.registers.program_counter =
+                KERNEL.global_labels["jumpdest_analysis_end"];
+            self.generation_state
+                .set_jumpdest_bits(&self.generation_state.get_current_code()?);
+            let opcode = self
+                .code()
+                .get(self.generation_state.registers.program_counter)
+                .byte(0);
+
+            decode(self.generation_state.registers, opcode)
+        } else {
+            Ok(op)
+        }
+    }
+
+    fn get_preinitialized_segments(&self) -> HashMap<Segment, MemorySegmentState> {
+        self.preinitialized_segments.clone()
+    }
+
+    fn fill_stack_fields(
+        &mut self,
+        row: &mut crate::cpu::columns::CpuColumnsView<F>,
+    ) -> Result<(), ProgramError> {
+        self.generation_state.registers.is_stack_top_read = false;
+        self.generation_state.registers.check_overflow = false;
+
+        Ok(())
     }
 }
 
