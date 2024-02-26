@@ -223,7 +223,6 @@ impl MemoryState {
     pub(crate) fn get(
         &self,
         address: MemoryAddress,
-        is_interpreter: bool,
         preinitialized_segments: &HashMap<Segment, MemorySegmentState, RandomState>,
     ) -> U256 {
         match self.get_option(address) {
@@ -271,7 +270,6 @@ impl MemoryState {
     pub(crate) fn read_global_metadata(&self, field: GlobalMetadata) -> U256 {
         self.get(
             MemoryAddress::new_bundle(U256::from(field as usize)).unwrap(),
-            false,
             &HashMap::default(),
         )
     }

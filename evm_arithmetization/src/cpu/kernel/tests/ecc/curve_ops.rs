@@ -216,7 +216,6 @@ mod bn {
                     segment: Segment::BnTableQ.unscale(),
                     virt: i,
                 },
-                false,
                 &HashMap::default(),
             ));
         }

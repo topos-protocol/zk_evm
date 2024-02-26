@@ -56,8 +56,8 @@ pub(crate) trait State<F: Field> {
     /// Returns a mutable `GenerationState` from a `State`.
     fn get_mut_generation_state(&mut self) -> &mut GenerationState<F>;
 
-    /// Returns true if a `State` is a `GenerationState` and false otherwise.
-    fn is_generation_state(&mut self) -> bool;
+    // /// Returns true if a `State` is a `GenerationState` and false otherwise.
+    // fn is_generation_state(&mut self) -> bool;
 
     /// Increments the clock of an `Interpreter`'s clock.
     fn incr_interpreter_clock(&mut self);
@@ -129,20 +129,12 @@ pub(crate) trait State<F: Field> {
             _ => bail!("TODO: figure out what to do with this..."),
         };
 
-        let (checkpoint, is_generation) = (self.checkpoint(), self.is_generation_state());
+        let checkpoint = self.checkpoint();
 
         let (row, _) = self.base_row();
-        generate_exception(
-            exc_code,
-            self.get_mut_generation_state(),
-            row,
-            is_generation,
-        );
+        generate_exception(exc_code, self.get_mut_generation_state(), row);
 
-        // We only clear traces for the interpreter
-        if !self.is_generation_state() {
-            self.clear_traces()
-        }
+        self.clear_traces();
 
         self.apply_ops(checkpoint);
 
@@ -181,16 +173,7 @@ pub(crate) trait State<F: Field> {
 
     /// Clears all traces from `GenerationState` except for
     /// memory_ops, which are necessary to apply operations.
-    fn clear_traces(&mut self) {
-        let generation_state = self.get_mut_generation_state();
-        generation_state.traces.arithmetic_ops = vec![];
-        generation_state.traces.arithmetic_ops = vec![];
-        generation_state.traces.byte_packing_ops = vec![];
-        generation_state.traces.cpu = vec![];
-        generation_state.traces.logic_ops = vec![];
-        generation_state.traces.keccak_inputs = vec![];
-        generation_state.traces.keccak_sponge_ops = vec![];
-    }
+    fn clear_traces(&mut self) {}
 
     fn try_perform_instruction(&mut self) -> Result<Operation, ProgramError>;
 
@@ -335,11 +318,8 @@ impl<F: Field> GenerationState<F> {
         let returndata_offset = ContextMetadata::ReturndataSize.unscale();
         let returndata_size_addr =
             MemoryAddress::new(ctx, Segment::ContextMetadata, returndata_offset);
-        let returndata_size = u256_to_usize(self.memory.get(
-            returndata_size_addr,
-            false,
-            &HashMap::default(),
-        ))?;
+        let returndata_size =
+            u256_to_usize(self.memory.get(returndata_size_addr, &HashMap::default()))?;
         let code = self.memory.contexts[ctx].segments[Segment::Returndata.unscale()].content
             [..returndata_size]
             .iter()
@@ -415,7 +395,7 @@ impl<F: Field> State<F> for GenerationState<F> {
 
     /// Returns the value stored at address `address` in a `State`.
     fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
-        self.memory.get(address, false, &HashMap::default())
+        self.memory.get(address, &HashMap::default())
     }
 
     /// Returns a mutable `GenerationState` from a `State`.
@@ -423,10 +403,10 @@ impl<F: Field> State<F> for GenerationState<F> {
         self
     }
 
-    /// Returns true if a `State` is a `GenerationState` and false otherwise.
-    fn is_generation_state(&mut self) -> bool {
-        true
-    }
+    // /// Returns true if a `State` is a `GenerationState` and false otherwise.
+    // fn is_generation_state(&mut self) -> bool {
+    //     true
+    // }
 
     /// Increments the clock of an `Interpreter`'s clock.
     fn incr_interpreter_clock(&mut self) {}

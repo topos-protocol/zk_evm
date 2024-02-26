@@ -423,7 +423,6 @@ impl<F: Field> GenerationState<F> {
             .map(|i| {
                 u256_to_u8(self.memory.get(
                     MemoryAddress::new(context, Segment::Code, i),
-                    false,
                     &HashMap::default(),
                 ))
             })
@@ -438,7 +437,6 @@ impl<F: Field> GenerationState<F> {
                 Segment::ContextMetadata,
                 ContextMetadata::CodeSize.unscale(),
             ),
-            false,
             &HashMap::default(),
         ))?;
         Ok(code_len)
@@ -477,7 +475,6 @@ impl<F: Field> GenerationState<F> {
     fn get_global_metadata(&self, data: GlobalMetadata) -> U256 {
         self.memory.get(
             MemoryAddress::new(0, Segment::GlobalMetadata, data.unscale()),
-            false,
             &HashMap::default(),
         )
     }
@@ -493,7 +490,6 @@ impl<F: Field> GenerationState<F> {
                     Segment::GlobalMetadata,
                     GlobalMetadata::AccessedStorageKeysLen.unscale(),
                 ),
-                false,
                 &HashMap::default(),
             ) - Segment::AccessedStorageKeys as usize,
         )?;

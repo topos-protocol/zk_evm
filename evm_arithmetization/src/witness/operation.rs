@@ -137,7 +137,6 @@ pub(crate) fn generate_ternary_arithmetic_op<F: Field>(
 pub(crate) fn generate_keccak_general<F: Field>(
     state: &mut GenerationState<F>,
     mut row: CpuColumnsView<F>,
-    is_interpreter: bool,
     preinitialized_segments: &HashMap<Segment, MemorySegmentState, RandomState>,
 ) -> Result<(), ProgramError> {
     let [(addr, _), (len, log_in1)] = stack_pop_with_log_and_fill::<2, _>(state, &mut row)?;
@@ -150,9 +149,7 @@ pub(crate) fn generate_keccak_general<F: Field>(
                 virt: base_address.virt.saturating_add(i),
                 ..base_address
             };
-            let val = state
-                .memory
-                .get(address, is_interpreter, preinitialized_segments);
+            let val = state.memory.get(address, preinitialized_segments);
             val.low_u32() as u8
         })
         .collect_vec();
@@ -297,13 +294,7 @@ pub(crate) fn generate_set_context<F: Field>(
         // Even though we might be in the interpreter, `Stack` is not part of the
         // preinitialized segments, so we don't need to carry out the additional checks
         // when get the value from memory.
-        mem_read_with_log(
-            GeneralPurpose(2),
-            new_sp_addr,
-            state,
-            false,
-            &HashMap::default(),
-        )
+        mem_read_with_log(GeneralPurpose(2), new_sp_addr, state, &HashMap::default())
     };
 
     // If the new stack isn't empty, read stack_top from memory.
@@ -325,14 +316,8 @@ pub(crate) fn generate_set_context<F: Field>(
         // Even though we might be in the interpreter, `Stack` is not part of the
         // preinitialized segments, so we don't need to carry out the additional checks
         // when get the value from memory.
-        let (new_top, log_read_new_top) = mem_read_gp_with_log_and_fill(
-            2,
-            new_top_addr,
-            state,
-            &mut row,
-            false,
-            &HashMap::default(),
-        );
+        let (new_top, log_read_new_top) =
+            mem_read_gp_with_log_and_fill(2, new_top_addr, state, &mut row, &HashMap::default());
         state.registers.stack_top = new_top;
         state.traces.push_memory(log_read_new_top);
     } else {
@@ -374,11 +359,6 @@ pub(crate) fn generate_push<F: Field>(
                         virt: base_address.virt + i,
                         ..base_address
                     },
-                    // Even though we might be in the interpreter, `Code` is not part of
-                    // the preinitialized segments, so we don't need to carry
-                    // out the additional checks when get the value from
-                    // memory.
-                    false,
                     &HashMap::default(),
                 )
                 .low_u32() as u8
@@ -458,7 +438,7 @@ pub(crate) fn generate_dup<F: Field>(
         // Even though we might be in the interpreter, `Stack` is not part of the
         // preinitialized segments, so we don't need to carry out the additional checks
         // when get the value from memory.
-        mem_read_gp_with_log_and_fill(2, other_addr, state, &mut row, false, &HashMap::default())
+        mem_read_gp_with_log_and_fill(2, other_addr, state, &mut row, &HashMap::default())
     };
     push_no_write(state, val);
 
@@ -484,7 +464,7 @@ pub(crate) fn generate_swap<F: Field>(
     // preinitialized segments, so we don't need to carry out the additional checks
     // when get the value from memory.
     let (in1, log_in1) =
-        mem_read_gp_with_log_and_fill(1, other_addr, state, &mut row, false, &HashMap::default());
+        mem_read_gp_with_log_and_fill(1, other_addr, state, &mut row, &HashMap::default());
     let log_out0 = mem_write_gp_log_and_fill(2, other_addr, state, &mut row, in0);
     push_no_write(state, in1);
 
@@ -555,7 +535,6 @@ fn append_shift<F: Field>(
             lookup_addr,
             state,
             &mut row,
-            false,
             &HashMap::default(),
         );
         state.traces.push_memory(read);
@@ -649,7 +628,7 @@ pub(crate) fn generate_syscall<F: Field>(
             // Even though we might be in the interpreter, `Code` is not part of the
             // preinitialized segments, so we don't need to carry out the additional checks
             // when get the value from memory.
-            let val = state.memory.get(address, false, &HashMap::default());
+            let val = state.memory.get(address, &HashMap::default());
             val.low_u32() as u8
         })
         .collect_vec();
@@ -752,7 +731,6 @@ pub(crate) fn generate_exit_kernel<F: Field>(
 pub(crate) fn generate_mload_general<F: Field>(
     state: &mut GenerationState<F>,
     mut row: CpuColumnsView<F>,
-    is_interpreter: bool,
     preinitialized_segments: &HashMap<Segment, MemorySegmentState, RandomState>,
 ) -> Result<(), ProgramError> {
     let [(addr, _)] = stack_pop_with_log_and_fill::<1, _>(state, &mut row)?;
@@ -762,7 +740,6 @@ pub(crate) fn generate_mload_general<F: Field>(
         MemoryAddress::new_bundle(addr)?,
         state,
         &mut row,
-        is_interpreter,
         preinitialized_segments,
     );
     push_no_write(state, val);
@@ -788,7 +765,6 @@ pub(crate) fn generate_mload_general<F: Field>(
 pub(crate) fn generate_mload_32bytes<F: Field>(
     state: &mut GenerationState<F>,
     mut row: CpuColumnsView<F>,
-    is_interpreter: bool,
     preinitialized_segments: &HashMap<Segment, MemorySegmentState, RandomState>,
 ) -> Result<(), ProgramError> {
     let [(addr, _), (len, log_in1)] = stack_pop_with_log_and_fill::<2, _>(state, &mut row)?;
@@ -810,9 +786,7 @@ pub(crate) fn generate_mload_32bytes<F: Field>(
                 virt: base_address.virt + i,
                 ..base_address
             };
-            let val = state
-                .memory
-                .get(address, is_interpreter, preinitialized_segments);
+            let val = state.memory.get(address, preinitialized_segments);
             val.low_u32() as u8
         })
         .collect_vec();
@@ -880,7 +854,6 @@ pub(crate) fn generate_exception<F: Field, T: Transition<F>>(
     exc_code: u8,
     state: &mut T,
     mut row: CpuColumnsView<F>,
-    is_generation: bool,
 ) -> Result<(), ProgramError> {
     // TDO: se fue arriba
     state.fill_stack_fields(&mut row)?;
@@ -916,9 +889,7 @@ pub(crate) fn generate_exception<F: Field, T: Transition<F>>(
             // Even though we might be in the interpreter, `Code` is not part of the
             // preinitialized segments, so we don't need to carry out the additional checks
             // when get the value from memory.
-            let val = generation_state
-                .memory
-                .get(address, false, &HashMap::default());
+            let val = generation_state.memory.get(address, &HashMap::default());
             val.low_u32() as u8
         })
         .collect_vec();
@@ -949,9 +920,7 @@ pub(crate) fn generate_exception<F: Field, T: Transition<F>>(
     // Even though we might be in the interpreter, `Code` is not part of the
     // preinitialized segments, so we don't need to carry out the additional checks
     // when get the value from memory.
-    let opcode = generation_state
-        .memory
-        .get(address, false, &HashMap::default());
+    let opcode = generation_state.memory.get(address, &HashMap::default());
 
     // `ArithmeticStark` range checks `mem_channels[0]`, which contains
     // the top of the stack, `mem_channels[1]`, which contains the new PC,

@@ -359,7 +359,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
                 ),
                 gen_state,
                 &mut row,
-                false,
                 &HashMap::default(),
             );
 
@@ -436,7 +435,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
             ),
             gen_state,
             &mut row,
-            false,
             &HashMap::default(),
         );
         if !should_jump || gen_state.registers.is_kernel {
@@ -478,7 +476,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
     ) -> Result<(), ProgramError> {
         /// It may
         let op = self.skip_if_necessary(op)?;
-        let is_interpreter = !self.is_generation_state();
         let preinitialized_segments = self.get_preinitialized_segments();
 
         #[cfg(debug_assertions)]
@@ -526,12 +523,9 @@ pub(crate) trait Transition<F: Field>: State<F> {
             Operation::TernaryArithmetic(op) => {
                 generate_ternary_arithmetic_op(op, generation_state, row)?
             }
-            Operation::KeccakGeneral => generate_keccak_general(
-                generation_state,
-                row,
-                is_interpreter,
-                &preinitialized_segments,
-            )?,
+            Operation::KeccakGeneral => {
+                generate_keccak_general(generation_state, row, &preinitialized_segments)?
+            }
             Operation::ProverInput => generate_prover_input(generation_state, row)?,
             Operation::Pop => generate_pop(generation_state, row)?,
             Operation::Jump => self.generate_jump(row)?,
@@ -540,26 +534,18 @@ pub(crate) trait Transition<F: Field>: State<F> {
             Operation::Jumpdest => generate_jumpdest(generation_state, row)?,
             Operation::GetContext => generate_get_context(generation_state, row)?,
             Operation::SetContext => generate_set_context(generation_state, row)?,
-            Operation::Mload32Bytes => generate_mload_32bytes(
-                generation_state,
-                row,
-                is_interpreter,
-                &preinitialized_segments,
-            )?,
+            Operation::Mload32Bytes => {
+                generate_mload_32bytes(generation_state, row, &preinitialized_segments)?
+            }
             Operation::Mstore32Bytes(n) => generate_mstore_32bytes(n, generation_state, row)?,
             Operation::ExitKernel => generate_exit_kernel(generation_state, row)?,
-            Operation::MloadGeneral => generate_mload_general(
-                generation_state,
-                row,
-                is_interpreter,
-                &preinitialized_segments,
-            )?,
+            Operation::MloadGeneral => {
+                generate_mload_general(generation_state, row, &preinitialized_segments)?
+            }
             Operation::MstoreGeneral => generate_mstore_general(generation_state, row)?,
         };
 
-        if !self.is_generation_state() {
-            self.clear_traces();
-        }
+        self.clear_traces();
         Ok(())
     }
 

@@ -619,7 +619,6 @@ impl<F: Field> Interpreter<F> {
         for i in range {
             let term = self.generation_state.memory.get(
                 MemoryAddress::new(0, segment, i),
-                true,
                 &self.preinitialized_segments,
             );
             output.push(term);
@@ -683,7 +682,6 @@ impl<F: Field> Interpreter<F> {
                     segment: Segment::JumpdestBits.unscale(),
                     virt: offset,
                 },
-                false,
                 &HashMap::default(),
             )
         } else {
@@ -765,33 +763,29 @@ impl<F: Field> State<F> for Interpreter<F> {
     }
 
     fn incr_gas(&mut self, n: u64) {
-        self.generation_state.registers.gas_used += n;
+        self.generation_state.incr_gas(n);
     }
 
     fn incr_pc(&mut self, n: usize) {
-        self.generation_state.registers.program_counter += n;
+        self.generation_state.incr_pc(n);
     }
 
     fn get_registers(&self) -> RegistersState {
-        self.generation_state.registers
+        self.generation_state.get_registers()
     }
 
     fn get_mut_registers(&mut self) -> &mut RegistersState {
-        &mut self.generation_state.registers
+        self.generation_state.get_mut_registers()
     }
 
     fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
         self.generation_state
             .memory
-            .get(address, true, &self.preinitialized_segments)
+            .get(address, &self.preinitialized_segments)
     }
 
     fn get_mut_generation_state(&mut self) -> &mut GenerationState<F> {
         &mut self.generation_state
-    }
-
-    fn is_generation_state(&mut self) -> bool {
-        false
     }
 
     fn incr_interpreter_clock(&mut self) {
@@ -866,12 +860,23 @@ impl<F: Field> State<F> for Interpreter<F> {
 
         self.perform_state_op(opcode, op, row)
     }
+
+    fn clear_traces(&mut self) {
+        let generation_state = self.get_mut_generation_state();
+        generation_state.traces.arithmetic_ops = vec![];
+        generation_state.traces.arithmetic_ops = vec![];
+        generation_state.traces.byte_packing_ops = vec![];
+        generation_state.traces.cpu = vec![];
+        generation_state.traces.logic_ops = vec![];
+        generation_state.traces.keccak_inputs = vec![];
+        generation_state.traces.keccak_sponge_ops = vec![];
+    }
 }
 
 impl<F: Field> Transition<F> for Interpreter<F> {
     fn generate_jumpdest_analysis(&mut self, dst: usize) -> bool {
         if self.is_jumpdest_analysis && !self.generation_state.registers.is_kernel {
-            self.add_jumpdest_offset(dst as usize);
+            self.add_jumpdest_offset(dst);
             true
         } else {
             false
