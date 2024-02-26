@@ -268,43 +268,6 @@ pub(crate) const fn might_overflow_op(op: Operation) -> bool {
     }
 }
 
-pub(crate) fn perform_state_op<F: Field, T: Transition<F>>(
-    any_state: &mut T,
-    opcode: u8,
-    op: Operation,
-    row: CpuColumnsView<F>,
-) -> Result<Operation, ProgramError> {
-    any_state.perform_op(op, opcode, row)?;
-    any_state.incr_pc(match op {
-        Operation::Syscall(_, _, _) | Operation::ExitKernel => 0,
-        Operation::Push(n) => n as usize + 1,
-        Operation::Jump | Operation::Jumpi => 0,
-        _ => 1,
-    });
-
-    any_state.incr_gas(gas_to_charge(op));
-    let registers = any_state.get_registers();
-    let gas_limit_address = MemoryAddress::new(
-        registers.context,
-        Segment::ContextMetadata,
-        ContextMetadata::GasLimit.unscale(), // context offsets are already scaled
-    );
-
-    if !registers.is_kernel {
-        let gas_limit = TryInto::<u64>::try_into(any_state.get_from_memory(gas_limit_address));
-        match gas_limit {
-            Ok(limit) => {
-                if registers.gas_used > limit {
-                    return Err(ProgramError::OutOfGas);
-                }
-            }
-            Err(_) => return Err(ProgramError::IntegerTooLarge),
-        }
-    }
-
-    Ok(op)
-}
-
 pub(crate) fn log_kernel_instruction<F: Field>(state: &mut GenerationState<F>, op: Operation) {
     // The logic below is a bit costly, so skip it if debug logs aren't enabled.
     if !log_enabled!(log::Level::Debug) {
@@ -336,6 +299,43 @@ pub(crate) fn log_kernel_instruction<F: Field>(state: &mut GenerationState<F>, o
 
 pub(crate) trait Transition<F: Field>: State<F> {
     fn generate_jumpdest_analysis(&mut self, dst: usize) -> bool;
+
+    fn perform_state_op(
+        &mut self,
+        opcode: u8,
+        op: Operation,
+        row: CpuColumnsView<F>,
+    ) -> Result<Operation, ProgramError> {
+        self.perform_op(op, opcode, row)?;
+        self.incr_pc(match op {
+            Operation::Syscall(_, _, _) | Operation::ExitKernel => 0,
+            Operation::Push(n) => n as usize + 1,
+            Operation::Jump | Operation::Jumpi => 0,
+            _ => 1,
+        });
+
+        self.incr_gas(gas_to_charge(op));
+        let registers = self.get_registers();
+        let gas_limit_address = MemoryAddress::new(
+            registers.context,
+            Segment::ContextMetadata,
+            ContextMetadata::GasLimit.unscale(), // context offsets are already scaled
+        );
+
+        if !registers.is_kernel {
+            let gas_limit = TryInto::<u64>::try_into(self.get_from_memory(gas_limit_address));
+            match gas_limit {
+                Ok(limit) => {
+                    if registers.gas_used > limit {
+                        return Err(ProgramError::OutOfGas);
+                    }
+                }
+                Err(_) => return Err(ProgramError::IntegerTooLarge),
+            }
+        }
+
+        Ok(op)
+    }
 
     fn generate_jump(&mut self, mut row: CpuColumnsView<F>) -> Result<(), ProgramError> {
         let [(dst, _)] =
@@ -564,50 +564,4 @@ pub(crate) trait Transition<F: Field>: State<F> {
     }
 
     fn fill_stack_fields(&mut self, row: &mut CpuColumnsView<F>) -> Result<(), ProgramError>;
-    // {
-    //     if state.registers.is_stack_top_read && is_generation {
-    //         let channel = &mut row.mem_channels[0];
-    //         channel.used = F::ONE;
-    //         channel.is_read = F::ONE;
-    //         channel.addr_context =
-    // F::from_canonical_usize(state.registers.context);         channel.
-    // addr_segment = F::from_canonical_usize(Segment::Stack.unscale());
-    //         channel.addr_virtual =
-    // F::from_canonical_usize(state.registers.stack_len - 1);
-
-    //         let address = MemoryAddress::new(
-    //             state.registers.context,
-    //             Segment::Stack,
-    //             state.registers.stack_len - 1,
-    //         );
-
-    //         let mem_op = MemoryOp::new(
-    //             GeneralPurpose(0),
-    //             state.traces.clock(),
-    //             address,
-    //             MemoryOpKind::Read,
-    //             state.registers.stack_top,
-    //         );
-    //         state.traces.push_memory(mem_op);
-    //     }
-    //     state.registers.is_stack_top_read = false;
-
-    //     if state.registers.check_overflow && is_generation {
-    //         if state.registers.is_kernel {
-    //             row.general.stack_mut().stack_len_bounds_aux = F::ZERO;
-    //         } else {
-    //             let clock = state.traces.clock();
-    //             let last_row = &mut state.traces.cpu[clock - 1];
-    //             let disallowed_len = F::from_canonical_usize(MAX_USER_STACK_SIZE
-    // + 1);             let diff = row.stack_len - disallowed_len; if let Some(inv)
-    //   = diff.try_inverse() { last_row.general.stack_mut().stack_len_bounds_aux =
-    //   inv; } else { // This is a stack overflow that should have been caught
-    // earlier.                 return Err(ProgramError::InterpreterError);
-    //             }
-    //         }
-    //     }
-    //     state.registers.check_overflow = false;
-
-    //     Ok(())
-    // }
 }

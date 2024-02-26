@@ -26,7 +26,7 @@ use crate::witness::state::RegistersState;
 use crate::witness::traces::{TraceCheckpoint, Traces};
 use crate::witness::transition::{
     decode, fill_op_flag, get_op_special_length, log_kernel_instruction, might_overflow_op,
-    perform_state_op, read_code_memory, Transition,
+    read_code_memory, Transition,
 };
 use crate::witness::util::{
     fill_channel_with_value, mem_read_gp_with_log_and_fill, stack_peek, stack_pop_with_log_and_fill,
@@ -505,7 +505,7 @@ impl<F: Field> State<F> for GenerationState<F> {
             row.general.stack_mut().stack_inv_aux = F::ONE;
         }
 
-        perform_state_op(self, opcode, op, row)
+        self.perform_state_op(opcode, op, row)
     }
 }
 

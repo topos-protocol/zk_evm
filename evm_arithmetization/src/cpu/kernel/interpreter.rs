@@ -38,8 +38,7 @@ use crate::witness::memory::{
 use crate::witness::operation::{Operation, CONTEXT_SCALING_FACTOR};
 use crate::witness::state::RegistersState;
 use crate::witness::transition::{
-    decode, fill_op_flag, get_op_special_length, log_kernel_instruction, perform_state_op,
-    Transition,
+    decode, fill_op_flag, get_op_special_length, log_kernel_instruction, Transition,
 };
 use crate::witness::util::{push_no_write, stack_peek};
 use crate::{arithmetic, logic};
@@ -865,7 +864,7 @@ impl<F: Field> State<F> for Interpreter<F> {
             row.general.stack_mut().stack_inv_aux = F::ONE;
         }
 
-        perform_state_op(self, opcode, op, row)
+        self.perform_state_op(opcode, op, row)
     }
 }
 
