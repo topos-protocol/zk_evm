@@ -855,7 +855,6 @@ pub(crate) fn generate_exception<F: Field, T: Transition<F>>(
     state: &mut T,
     mut row: CpuColumnsView<F>,
 ) -> Result<(), ProgramError> {
-    // TDO: se fue arriba
     state.fill_stack_fields(&mut row)?;
     let generation_state = state.get_mut_generation_state();
     if TryInto::<u32>::try_into(generation_state.registers.gas_used).is_err() {
