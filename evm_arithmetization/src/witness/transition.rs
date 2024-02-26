@@ -478,7 +478,7 @@ pub(crate) trait Transition<F: Field>: State<F> {
     ) -> Result<(), ProgramError> {
         /// It may
         let op = self.skip_if_necessary(op)?;
-        let is_interpreter = self.is_generation_state();
+        let is_interpreter = !self.is_generation_state();
         let preinitialized_segments = self.get_preinitialized_segments();
 
         #[cfg(debug_assertions)]
