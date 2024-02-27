@@ -74,7 +74,9 @@ pub(crate) trait State<F: Field> {
     /// Returns the current context.
     fn get_context(&mut self) -> usize;
 
-    fn get_halt_context(&mut self) -> Option<usize>;
+    fn get_halt_context(&mut self) -> Option<usize> {
+        None
+    }
 
     /// Returns the content of a the `KernelGeneral` segment of a `State`.
     fn mem_get_kernel_content(&self) -> Vec<Option<U256>>;
@@ -448,10 +450,6 @@ impl<F: Field> State<F> for GenerationState<F> {
 
     fn get_context(&mut self) -> usize {
         self.registers.context
-    }
-
-    fn get_halt_context(&mut self) -> Option<usize> {
-        None
     }
 
     /// Returns the content of a the `KernelGeneral` segment of a `State`.
