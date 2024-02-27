@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::hash::RandomState;
 
 use ethereum_types::U256;
-use serde::{Deserialize, Serialize};
 
 use crate::cpu::membus::{NUM_CHANNELS, NUM_GP_CHANNELS};
 
@@ -35,7 +33,7 @@ impl MemoryChannel {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct MemoryAddress {
     pub(crate) context: usize,
     pub(crate) segment: usize,
@@ -190,24 +188,16 @@ impl MemoryState {
         }
     }
 
-    pub(crate) fn get_option(&self, address: MemoryAddress) -> Option<U256> {
+    pub(crate) fn get(&self, address: MemoryAddress) -> Option<U256> {
         if address.context >= self.contexts.len() {
             return None;
         }
 
-        let segment = Segment::all()[address.segment];
+        let segments = Segment::all();
+        let segment = segments.get(address.segment)?;
 
-        if let Some(constant) = Segment::constant(&segment, address.virt) {
-            return Some(constant);
-        }
-
-        if address.virt
-            >= self.contexts[address.context].segments[address.segment]
-                .content
-                .len()
-            || self.contexts[address.context].segments[address.segment].content[address.virt]
-                .is_none()
-        {
+        let content = &self.contexts[address.context].segments[address.segment].content;
+        if address.virt >= content.len() || content[address.virt].is_none() {
             return None;
         }
         let val = self.contexts[address.context].segments[address.segment].get(address.virt);
@@ -221,8 +211,8 @@ impl MemoryState {
         Some(val)
     }
 
-    pub(crate) fn get(&self, address: MemoryAddress) -> U256 {
-        match self.get_option(address) {
+    pub(crate) fn get_with_init(&self, address: MemoryAddress) -> U256 {
+        match self.get(address) {
             Some(val) => val,
             None => {
                 let segment = Segment::all()[address.segment];
@@ -236,7 +226,8 @@ impl MemoryState {
                             .content
                             .len()
                 {
-                    self.preinitialized_segments.get(&segment).unwrap().content[offset].unwrap()
+                    self.preinitialized_segments.get(&segment).unwrap().content[offset]
+                        .expect("We checked that the offset is not out of bounds.")
                 } else {
                     0.into()
                 }
@@ -251,14 +242,6 @@ impl MemoryState {
 
         let segment = Segment::all()[address.segment];
 
-        if let Some(constant) = Segment::constant(&segment, address.virt) {
-            assert!(
-                constant == val,
-                "Attempting to set constant {} to incorrect value",
-                address.virt
-            );
-            return;
-        }
         assert!(
             val.bits() <= segment.bit_range(),
             "Value {} exceeds {:?} range of {} bits",
@@ -271,7 +254,7 @@ impl MemoryState {
 
     // These fields are already scaled by their respective segment.
     pub(crate) fn read_global_metadata(&self, field: GlobalMetadata) -> U256 {
-        self.get(MemoryAddress::new_bundle(U256::from(field as usize)).unwrap())
+        self.get_with_init(MemoryAddress::new_bundle(U256::from(field as usize)).unwrap())
     }
 
     /// Inserts a segment and its preinitialized values in
@@ -347,7 +330,7 @@ impl MemorySegmentState {
         self.content[virtual_addr] = Some(value);
     }
 
-    pub(crate) fn return_content(&self) -> Vec<U256> {
+    pub(crate) fn content(&self) -> Vec<U256> {
         self.content
             .iter()
             .map(|&val| val.unwrap_or_default())

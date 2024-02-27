@@ -13,7 +13,6 @@ use super::state::State;
 use crate::cpu::kernel::constants::context_metadata::ContextMetadata;
 use crate::cpu::kernel::constants::global_metadata::GlobalMetadata;
 use crate::cpu::kernel::interpreter::simulate_cpu_and_get_user_jumps;
-use crate::cpu::kernel::opcodes::get_push_opcode;
 use crate::extension_tower::{FieldExt, Fp12, BLS381, BN254};
 use crate::generation::prover_input::EvmField::{
     Bls381Base, Bls381Scalar, Bn254Base, Bn254Scalar, Secp256k1Base, Secp256k1Scalar,
@@ -124,9 +123,7 @@ impl<F: Field> GenerationState<F> {
         let ptr = stack_peek(self, 11 - n).map(u256_to_usize)??;
 
         let f: [U256; 12] = match field {
-            Bn254Base => {
-                std::array::from_fn(|i| current_context_peek(self, BnPairing, ptr + i, false))
-            }
+            Bn254Base => std::array::from_fn(|i| current_context_peek(self, BnPairing, ptr + i)),
             _ => todo!(),
         };
         Ok(field.field_extension_inverse(n, f))
@@ -202,12 +199,12 @@ impl<F: Field> GenerationState<F> {
         m_start_loc: usize,
     ) -> (Vec<U256>, Vec<U256>) {
         let n = self.memory.contexts.len();
-        let a = &self.memory.contexts[n - 1].segments[Segment::KernelGeneral.unscale()]
-            .return_content()[a_start_loc..a_start_loc + len];
-        let b = &self.memory.contexts[n - 1].segments[Segment::KernelGeneral.unscale()]
-            .return_content()[b_start_loc..b_start_loc + len];
-        let m = &self.memory.contexts[n - 1].segments[Segment::KernelGeneral.unscale()]
-            .return_content()[m_start_loc..m_start_loc + len];
+        let a = &self.memory.contexts[n - 1].segments[Segment::KernelGeneral.unscale()].content()
+            [a_start_loc..a_start_loc + len];
+        let b = &self.memory.contexts[n - 1].segments[Segment::KernelGeneral.unscale()].content()
+            [b_start_loc..b_start_loc + len];
+        let m = &self.memory.contexts[n - 1].segments[Segment::KernelGeneral.unscale()].content()
+            [m_start_loc..m_start_loc + len];
 
         let a_biguint = mem_vec_to_biguint(a);
         let b_biguint = mem_vec_to_biguint(b);
@@ -243,12 +240,13 @@ impl<F: Field> GenerationState<F> {
         }
     }
 
-    /// Generate either the next used jump address or the proof for the last
-    /// jump address.
+    /// Generate either the next used jump address, the proof for the last
+    /// jump address, or a non-jumpdest proof.
     fn run_jumpdest_table(&mut self, input_fn: &ProverInputFn) -> Result<U256, ProgramError> {
         match input_fn.0[1].as_str() {
             "next_address" => self.run_next_jumpdest_table_address(),
             "next_proof" => self.run_next_jumpdest_table_proof(),
+            "non_jumpdest_proof" => self.run_next_non_jumpdest_proof(),
             _ => Err(ProgramError::ProverInputError(InvalidInput)),
         }
     }
@@ -324,6 +322,20 @@ impl<F: Field> GenerationState<F> {
         }
     }
 
+    /// Returns a non-jumpdest proof for the address on the top of the stack. A
+    /// non-jumpdest proof is the closest address to the address on the top of
+    /// the stack, if the closses address is >= 32, or zero otherwise.
+    fn run_next_non_jumpdest_proof(&mut self) -> Result<U256, ProgramError> {
+        let code = self.get_current_code()?;
+        let address = u256_to_usize(stack_peek(self, 0)?)?;
+        let closest_opcode_addr = get_closest_opcode_address(&code, address);
+        Ok(if closest_opcode_addr < 32 {
+            U256::zero()
+        } else {
+            closest_opcode_addr.into()
+        })
+    }
+
     /// Returns a pointer to an element in the list whose value is such that
     /// `value <= addr < next_value` and `addr` is the top of the stack.
     fn run_next_addresses_insert(&mut self) -> Result<U256, ProgramError> {
@@ -384,7 +396,7 @@ impl<F: Field> GenerationState<F> {
     /// Simulate the user's code and store all the jump addresses with their
     /// respective contexts.
     fn generate_jumpdest_table(&mut self) -> Result<(), ProgramError> {
-        let checkpoint = self.checkpoint();
+        let _checkpoint = self.checkpoint();
 
         // Simulate the user's code and (unnecessarily) part of the kernel code,
         // skipping the validate table call
@@ -423,7 +435,7 @@ impl<F: Field> GenerationState<F> {
             .map(|i| {
                 u256_to_u8(
                     self.memory
-                        .get(MemoryAddress::new(context, Segment::Code, i)),
+                        .get_with_init(MemoryAddress::new(context, Segment::Code, i)),
                 )
             })
             .collect::<Result<Vec<u8>, _>>()?;
@@ -431,7 +443,7 @@ impl<F: Field> GenerationState<F> {
     }
 
     fn get_code_len(&self, context: usize) -> Result<usize, ProgramError> {
-        let code_len = u256_to_usize(self.memory.get(MemoryAddress::new(
+        let code_len = u256_to_usize(self.memory.get_with_init(MemoryAddress::new(
             context,
             Segment::ContextMetadata,
             ContextMetadata::CodeSize.unscale(),
@@ -470,7 +482,7 @@ impl<F: Field> GenerationState<F> {
     }
 
     fn get_global_metadata(&self, data: GlobalMetadata) -> U256 {
-        self.memory.get(MemoryAddress::new(
+        self.memory.get_with_init(MemoryAddress::new(
             0,
             Segment::GlobalMetadata,
             data.unscale(),
@@ -482,7 +494,7 @@ impl<F: Field> GenerationState<F> {
         // virtual address in the segment. In order to get the length we need
         // to substract Segment::AccessedStorageKeys as usize
         let acc_storage_len = u256_to_usize(
-            self.memory.get(MemoryAddress::new(
+            self.memory.get_with_init(MemoryAddress::new(
                 0,
                 Segment::GlobalMetadata,
                 GlobalMetadata::AccessedStorageKeysLen.unscale(),
@@ -531,6 +543,15 @@ fn get_proofs_and_jumpdests(
         },
     );
     proofs
+}
+
+/// Return the largest prev_addr in `code` such that `code[pred_addr]` is an
+/// opcode (and not the argument of some PUSHXX) and pred_addr <= address
+fn get_closest_opcode_address(code: &[u8], address: usize) -> usize {
+    let (prev_addr, _) = CodeIterator::until(code, address + 1)
+        .last()
+        .unwrap_or((0, 0));
+    prev_addr
 }
 
 /// An iterator over the EVM code contained in `code`, which skips the bytes
@@ -621,7 +642,6 @@ impl<'a> Iterator for AccList<'a> {
     type Item = (usize, U256, U256);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let addr = self.access_list_mem[self.pos];
         if let Ok(new_pos) =
             u256_to_usize(get_val(self.access_list_mem[self.pos + self.node_size - 1]))
         {

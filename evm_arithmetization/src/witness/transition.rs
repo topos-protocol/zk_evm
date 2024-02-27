@@ -14,7 +14,6 @@ use super::util::{
 use crate::cpu::columns::CpuColumnsView;
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::constants::context_metadata::ContextMetadata;
-use crate::cpu::kernel::interpreter::InterpreterMemOpKind;
 use crate::cpu::membus::NUM_GP_CHANNELS;
 use crate::cpu::stack::{
     EQ_STACK_BEHAVIOR, IS_ZERO_STACK_BEHAVIOR, JUMPI_OP, JUMP_OP, MAX_USER_STACK_SIZE,
@@ -40,7 +39,7 @@ pub(crate) fn read_code_memory<F: Field>(
     row.code_context = F::from_canonical_usize(code_context);
 
     let address = MemoryAddress::new(code_context, Segment::Code, state.registers.program_counter);
-    let (opcode, mem_log) = mem_read_code_with_log_and_fill(address, state, row, false);
+    let (opcode, mem_log) = mem_read_code_with_log_and_fill(address, state, row);
 
     state.traces.push_memory(mem_log);
 
@@ -336,7 +335,11 @@ pub(crate) trait Transition<F: Field>: State<F> {
         Ok(op)
     }
 
-    fn generate_jump(&mut self, mut row: CpuColumnsView<F>) -> Result<(), ProgramError> {
+    fn generate_jump(
+        &mut self,
+        mut row: CpuColumnsView<F>,
+        is_generation: bool,
+    ) -> Result<(), ProgramError> {
         let [(dst, _)] =
             stack_pop_with_log_and_fill::<1, _>(self.get_mut_generation_state(), &mut row)?;
 
@@ -384,13 +387,17 @@ pub(crate) trait Transition<F: Field>: State<F> {
                 row.general.stack_mut().stack_inv_aux = F::ZERO;
             }
 
-            gen_state.traces.push_cpu(row);
+            gen_state.traces.push_cpu(is_generation, row);
         }
         self.get_mut_generation_state().jump_to(dst as usize)?;
         Ok(())
     }
 
-    fn generate_jumpi(&mut self, mut row: CpuColumnsView<F>) -> Result<(), ProgramError> {
+    fn generate_jumpi(
+        &mut self,
+        mut row: CpuColumnsView<F>,
+        is_generation: bool,
+    ) -> Result<(), ProgramError> {
         let [(dst, _), (cond, log_cond)] =
             stack_pop_with_log_and_fill::<2, _>(self.get_mut_generation_state(), &mut row)?;
 
@@ -450,7 +457,7 @@ pub(crate) trait Transition<F: Field>: State<F> {
         }
 
         gen_state.traces.push_memory(log_cond);
-        gen_state.traces.push_cpu(row);
+        gen_state.traces.push_cpu(is_generation, row);
         Ok(())
     }
 
@@ -479,19 +486,20 @@ pub(crate) trait Transition<F: Field>: State<F> {
             );
         }
 
+        let is_generation = self.is_generation();
         let generation_state = self.get_mut_generation_state();
 
         match op {
-            Operation::Push(n) => generate_push(n, generation_state, row)?,
-            Operation::Dup(n) => generate_dup(n, generation_state, row)?,
-            Operation::Swap(n) => generate_swap(n, generation_state, row)?,
-            Operation::Iszero => generate_iszero(generation_state, row)?,
-            Operation::Not => generate_not(generation_state, row)?,
+            Operation::Push(n) => generate_push(n, generation_state, row, is_generation)?,
+            Operation::Dup(n) => generate_dup(n, generation_state, row, is_generation)?,
+            Operation::Swap(n) => generate_swap(n, generation_state, row, is_generation)?,
+            Operation::Iszero => generate_iszero(generation_state, row, is_generation)?,
+            Operation::Not => generate_not(generation_state, row, is_generation)?,
             Operation::BinaryArithmetic(arithmetic::BinaryOperator::Shl) => {
-                generate_shl(generation_state, row)?
+                generate_shl(generation_state, row, is_generation)?
             }
             Operation::BinaryArithmetic(arithmetic::BinaryOperator::Shr) => {
-                generate_shr(generation_state, row)?
+                generate_shr(generation_state, row, is_generation)?
             }
             Operation::Syscall(opcode, stack_values_read, stack_len_increased) => generate_syscall(
                 opcode,
@@ -499,34 +507,44 @@ pub(crate) trait Transition<F: Field>: State<F> {
                 stack_len_increased,
                 generation_state,
                 row,
+                is_generation,
             )?,
-            Operation::Eq => generate_eq(generation_state, row)?,
+            Operation::Eq => generate_eq(generation_state, row, is_generation)?,
             Operation::BinaryLogic(binary_logic_op) => {
-                generate_binary_logic_op(binary_logic_op, generation_state, row)?
+                generate_binary_logic_op(binary_logic_op, generation_state, row, is_generation)?
             }
             Operation::BinaryArithmetic(op) => {
-                generate_binary_arithmetic_op(op, generation_state, row)?
+                generate_binary_arithmetic_op(op, generation_state, row, is_generation)?
             }
             Operation::TernaryArithmetic(op) => {
-                generate_ternary_arithmetic_op(op, generation_state, row)?
+                generate_ternary_arithmetic_op(op, generation_state, row, is_generation)?
             }
-            Operation::KeccakGeneral => generate_keccak_general(generation_state, row)?,
-            Operation::ProverInput => generate_prover_input(generation_state, row)?,
-            Operation::Pop => generate_pop(generation_state, row)?,
-            Operation::Jump => self.generate_jump(row)?,
-            Operation::Jumpi => self.generate_jumpi(row)?,
-            Operation::Pc => generate_pc(generation_state, row)?,
-            Operation::Jumpdest => generate_jumpdest(generation_state, row)?,
-            Operation::GetContext => generate_get_context(generation_state, row)?,
-            Operation::SetContext => generate_set_context(generation_state, row)?,
-            Operation::Mload32Bytes => generate_mload_32bytes(generation_state, row)?,
-            Operation::Mstore32Bytes(n) => generate_mstore_32bytes(n, generation_state, row)?,
-            Operation::ExitKernel => generate_exit_kernel(generation_state, row)?,
-            Operation::MloadGeneral => generate_mload_general(generation_state, row)?,
-            Operation::MstoreGeneral => generate_mstore_general(generation_state, row)?,
+            Operation::KeccakGeneral => {
+                generate_keccak_general(generation_state, row, is_generation)?
+            }
+            Operation::ProverInput => generate_prover_input(generation_state, row, is_generation)?,
+            Operation::Pop => generate_pop(generation_state, row, is_generation)?,
+            Operation::Jump => self.generate_jump(row, is_generation)?,
+            Operation::Jumpi => self.generate_jumpi(row, is_generation)?,
+            Operation::Pc => generate_pc(generation_state, row, is_generation)?,
+            Operation::Jumpdest => generate_jumpdest(generation_state, row, is_generation)?,
+            Operation::GetContext => generate_get_context(generation_state, row, is_generation)?,
+            Operation::SetContext => generate_set_context(generation_state, row, is_generation)?,
+            Operation::Mload32Bytes => {
+                generate_mload_32bytes(generation_state, row, is_generation)?
+            }
+            Operation::Mstore32Bytes(n) => {
+                generate_mstore_32bytes(n, generation_state, row, is_generation)?
+            }
+            Operation::ExitKernel => generate_exit_kernel(generation_state, row, is_generation)?,
+            Operation::MloadGeneral => {
+                generate_mload_general(generation_state, row, is_generation)?
+            }
+            Operation::MstoreGeneral => {
+                generate_mstore_general(generation_state, row, is_generation)?
+            }
         };
 
-        self.clear_traces();
         Ok(())
     }
 

@@ -38,6 +38,9 @@ pub(crate) trait State<F: Field> {
     /// Returns a `State`'s `Checkpoint`.
     fn checkpoint(&mut self) -> GenerationStateCheckpoint;
 
+    fn is_generation(&mut self) -> bool {
+        true
+    }
     /// Increments the `gas_used` register by a value `n`.
     fn incr_gas(&mut self, n: u64);
 
@@ -146,9 +149,8 @@ pub(crate) trait State<F: Field> {
         let checkpoint = self.checkpoint();
 
         let (row, _) = self.base_row();
-        generate_exception(exc_code, self, row);
-
-        self.clear_traces();
+        let is_generation = self.is_generation();
+        generate_exception(exc_code, self, row, is_generation);
 
         self.apply_ops(checkpoint);
 
@@ -188,10 +190,6 @@ pub(crate) trait State<F: Field> {
             }
         }
     }
-
-    /// Clears all traces from `GenerationState` except for
-    /// memory_ops, which are necessary to apply operations.
-    fn clear_traces(&mut self) {}
 
     fn try_perform_instruction(&mut self) -> Result<Operation, ProgramError>;
 
@@ -336,7 +334,7 @@ impl<F: Field> GenerationState<F> {
         let returndata_offset = ContextMetadata::ReturndataSize.unscale();
         let returndata_size_addr =
             MemoryAddress::new(ctx, Segment::ContextMetadata, returndata_offset);
-        let returndata_size = u256_to_usize(self.memory.get(returndata_size_addr))?;
+        let returndata_size = u256_to_usize(self.memory.get_with_init(returndata_size_addr))?;
         let code = self.memory.contexts[ctx].segments[Segment::Returndata.unscale()].content
             [..returndata_size]
             .iter()
@@ -422,7 +420,7 @@ impl<F: Field> State<F> for GenerationState<F> {
 
     /// Returns the value stored at address `address` in a `State`.
     fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
-        self.memory.get(address)
+        self.memory.get_with_init(address)
     }
 
     /// Returns a mutable `GenerationState` from a `State`.

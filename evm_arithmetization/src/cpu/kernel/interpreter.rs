@@ -4,44 +4,33 @@ use core::cmp::Ordering;
 use core::ops::Range;
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::{anyhow, bail};
-use ethereum_types::{BigEndianHash, H160, H256, U256, U512};
-use keccak_hash::keccak;
+use anyhow::anyhow;
+use ethereum_types::{BigEndianHash, U256};
 use mpt_trie::partial_trie::PartialTrie;
 use plonky2::field::goldilocks_field::GoldilocksField;
 use plonky2::field::types::Field;
 
-use super::assembler::BYTES_PER_OFFSET;
-use super::utils::u256_from_bool;
 use crate::cpu::kernel::aggregator::KERNEL;
-use crate::cpu::kernel::assembler::Kernel;
 use crate::cpu::kernel::constants::context_metadata::ContextMetadata;
 use crate::cpu::kernel::constants::global_metadata::GlobalMetadata;
 use crate::cpu::kernel::constants::txn_fields::NormalizedTxnField;
-use crate::cpu::stack::MAX_USER_STACK_SIZE;
-use crate::cpu::{decode, halt};
-use crate::extension_tower::BN_BASE;
 use crate::generation::mpt::load_all_mpts;
-use crate::generation::prover_input::ProverInputFn;
 use crate::generation::rlp::all_rlp_prover_inputs_reversed;
 use crate::generation::state::{
-    self, all_withdrawals_prover_inputs_reversed, GenerationState, GenerationStateCheckpoint,
+    all_withdrawals_prover_inputs_reversed, GenerationState, GenerationStateCheckpoint,
 };
 use crate::generation::{state::State, GenerationInputs};
-use crate::memory::segments::{Segment, SEGMENT_SCALING_FACTOR};
-use crate::util::{h2u, u256_to_u8, u256_to_usize};
-use crate::witness::errors::{ProgramError, ProverInputError};
-use crate::witness::gas::gas_to_charge;
+use crate::memory::segments::Segment;
+use crate::util::h2u;
+use crate::witness::errors::ProgramError;
 use crate::witness::memory::{
-    MemoryAddress, MemoryContextState, MemoryOp, MemoryOpKind, MemorySegmentState, MemoryState,
+    MemoryAddress, MemoryContextState, MemoryOp, MemoryOpKind, MemorySegmentState,
 };
-use crate::witness::operation::{Operation, CONTEXT_SCALING_FACTOR};
+use crate::witness::operation::Operation;
 use crate::witness::state::RegistersState;
 use crate::witness::transition::{
     decode, fill_op_flag, get_op_special_length, log_kernel_instruction, Transition,
 };
-use crate::witness::util::{push_no_write, stack_peek};
-use crate::{arithmetic, logic};
 
 type F = GoldilocksField;
 
@@ -49,15 +38,21 @@ type F = GoldilocksField;
 const DEFAULT_HALT_OFFSET: usize = 0xdeadbeef;
 
 pub(crate) struct Interpreter<F: Field> {
+    /// The interpreter holds a `GenerationState` to keep track of the memory
+    /// and registers.
     pub(crate) generation_state: GenerationState<F>,
+    // All offsets at which the interpreter execution halts.
     pub(crate) halt_offsets: Vec<usize>,
-    // The interpreter will halt only if the current context matches halt_context
+    /// The interpreter will halt only if the current context matches
+    /// halt_context
     pub(crate) halt_context: Option<usize>,
-    pub(crate) debug_offsets: Vec<usize>,
+    /// Counts the number of appearances of each opcode. For debugging purposes.
     pub(crate) opcode_count: [usize; 0x100],
-    memops: Vec<InterpreterMemOpKind>,
     jumpdest_table: HashMap<usize, BTreeSet<usize>>,
+    /// `true` if the we are currently carrying out a jumpdest analysis.
     pub(crate) is_jumpdest_analysis: bool,
+    /// Holds the value of the clock: the clock counts the number of operations
+    /// in the execution.
     pub(crate) clock: usize,
 }
 
@@ -129,7 +124,7 @@ pub(crate) fn simulate_cpu_and_get_user_jumps<F: Field>(
 
             interpreter.run();
 
-            log::debug!("jdt = {:?}", interpreter.jumpdest_table);
+            log::trace!("jumpdest table = {:?}", interpreter.jumpdest_table);
 
             interpreter
                 .generation_state
@@ -141,54 +136,45 @@ pub(crate) fn simulate_cpu_and_get_user_jumps<F: Field>(
     }
 }
 
-/// Different types of Memory operations in the interpreter.
-#[derive(Debug)]
-pub(crate) enum InterpreterMemOpKind {
-    Read(U256, MemoryAddress),
-    Write(U256, MemoryAddress),
-}
-
 impl<F: Field> Interpreter<F> {
     /// Returns an instance of `Interpreter` given `GenerationInputs`, and
     /// assuming we are initializing with the `KERNEL` code.
-    pub(crate) fn new_with_generation_inputs_and_kernel(
+    pub(crate) fn new_with_generation_inputs(
         initial_offset: usize,
         initial_stack: Vec<U256>,
         inputs: GenerationInputs,
     ) -> Self {
         let mut result = Self::new(initial_offset, initial_stack);
-        result.initialize_interpreter_state_with_kernel(inputs);
+        result.initialize_interpreter_state(inputs);
         result
     }
 
     pub(crate) fn new(initial_offset: usize, initial_stack: Vec<U256>) -> Self {
-        let mut result = Self {
+        let mut interpreter = Self {
             generation_state: GenerationState::new(GenerationInputs::default(), &KERNEL.code)
                 .expect("Default inputs are known-good"),
             // `DEFAULT_HALT_OFFSET` is used as a halting point for the interpreter,
             // while the label `halt` is the halting label in the kernel.
             halt_offsets: vec![DEFAULT_HALT_OFFSET, KERNEL.global_labels["halt"]],
             halt_context: None,
-            debug_offsets: vec![],
             opcode_count: [0; 256],
-            memops: vec![],
             jumpdest_table: HashMap::new(),
             is_jumpdest_analysis: false,
             clock: 0,
         };
-        result.generation_state.registers.program_counter = initial_offset;
+        interpreter.generation_state.registers.program_counter = initial_offset;
         let initial_stack_len = initial_stack.len();
-        result.generation_state.registers.stack_len = initial_stack_len;
+        interpreter.generation_state.registers.stack_len = initial_stack_len;
         if !initial_stack.is_empty() {
-            result.generation_state.registers.stack_top = initial_stack[initial_stack_len - 1];
-            *result.stack_segment_mut() = initial_stack
+            interpreter.generation_state.registers.stack_top = initial_stack[initial_stack_len - 1];
+            *interpreter.stack_segment_mut() = initial_stack
                 .iter()
                 .map(|&elt| Some(elt))
                 .collect::<Vec<_>>();
         }
 
-        result.initialize_rlp_segment();
-        result
+        interpreter.initialize_rlp_segment();
+        interpreter
     }
 
     pub(crate) fn new_with_state_and_halt_condition(
@@ -200,28 +186,17 @@ impl<F: Field> Interpreter<F> {
             generation_state: state.soft_clone(),
             halt_offsets: vec![halt_offset],
             halt_context: Some(halt_context),
-            debug_offsets: vec![],
             opcode_count: [0; 256],
-            memops: vec![],
             jumpdest_table: HashMap::new(),
             is_jumpdest_analysis: true,
             clock: 0,
         }
     }
 
-    /// Initializes the interpreter state given `GenerationInputs`, using the
-    /// KERNEL code.
-    pub(crate) fn initialize_interpreter_state_with_kernel(&mut self, inputs: GenerationInputs) {
-        self.initialize_interpreter_state(inputs, KERNEL.code_hash, KERNEL.code.len());
-    }
-
     /// Initializes the interpreter state given `GenerationInputs`.
-    pub(crate) fn initialize_interpreter_state(
-        &mut self,
-        inputs: GenerationInputs,
-        kernel_hash: H256,
-        kernel_code_len: usize,
-    ) {
+    pub(crate) fn initialize_interpreter_state(&mut self, inputs: GenerationInputs) {
+        let kernel_hash = KERNEL.code_hash;
+        let kernel_code_len = KERNEL.code.len();
         let tries = &inputs.tries;
 
         // Set state's inputs.
@@ -340,7 +315,8 @@ impl<F: Field> Interpreter<F> {
         self.set_memory_multi_addresses(&block_hashes_fields);
     }
 
-    /// Applies all memory operations since the last checkpoint.
+    /// Applies all memory operations since the last checkpoint. The memory
+    /// operations are cleared at each checkpoint.
     pub(crate) fn apply_memops(&mut self) -> Result<(), anyhow::Error> {
         for memop in &self.generation_state.traces.memory_ops {
             let &MemoryOp {
@@ -351,15 +327,9 @@ impl<F: Field> Interpreter<F> {
             } = memop;
             match kind {
                 MemoryOpKind::Read => {
-                    if self.generation_state.memory.get_option(address).is_none() {
-                        if !self.is_preinitialized_segment(address.segment) {
-                            assert_eq!(
-                                value,
-                                0.into(),
-                                "Value {:?} read  at address {:?} should be 0",
-                                value,
-                                address
-                            );
+                    if self.generation_state.memory.get(address).is_none() {
+                        if !self.is_preinitialized_segment(address.segment) && !value.is_zero() {
+                            return Err(anyhow!("The initial value {:?} at address {:?} should be zero, because it is not preinitialized.", value, address));
                         }
                         self.generation_state.memory.set(address, value);
                     }
@@ -414,8 +384,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     pub(crate) fn get_txn_data(&self) -> Vec<U256> {
-        self.generation_state.memory.contexts[0].segments[Segment::TxnData.unscale()]
-            .return_content()
+        self.generation_state.memory.contexts[0].segments[Segment::TxnData.unscale()].content()
     }
 
     pub(crate) fn get_context_metadata_field(&self, ctx: usize, field: ContextMetadata) -> U256 {
@@ -488,7 +457,7 @@ impl<F: Field> Interpreter<F> {
                     .generation_state
                     .memory
                     .get_preinitialized_segment(segment)
-                    .unwrap()
+                    .expect("The segment should be in the preinitialized segments.")
                     .content,
             );
             let init_len = res.len();
@@ -498,7 +467,7 @@ impl<F: Field> Interpreter<F> {
             ));
             res
         } else {
-            self.generation_state.memory.contexts[0].segments[segment.unscale()].return_content()
+            self.generation_state.memory.contexts[0].segments[segment.unscale()].content()
         }
     }
 
@@ -510,7 +479,7 @@ impl<F: Field> Interpreter<F> {
     pub(crate) fn get_current_general_memory(&self) -> Vec<U256> {
         self.generation_state.memory.contexts[self.context()].segments
             [Segment::KernelGeneral.unscale()]
-        .return_content()
+        .content()
     }
 
     pub(crate) fn get_kernel_general_memory(&self) -> Vec<U256> {
@@ -537,6 +506,23 @@ impl<F: Field> Interpreter<F> {
             .into_iter()
             .map(|val| Some(U256::from(val)))
             .collect();
+    }
+
+    pub(crate) fn extend_memory_segment(&mut self, segment: Segment, memory: &[Option<U256>]) {
+        self.generation_state.memory.contexts[0].segments[segment.unscale()]
+            .content
+            .extend(memory);
+    }
+
+    pub(crate) fn extend_memory_segment_bytes(&mut self, segment: Segment, memory: Vec<u8>) {
+        self.generation_state.memory.contexts[0].segments[segment.unscale()]
+            .content
+            .extend(
+                memory
+                    .into_iter()
+                    .map(|elt| Some(U256::from(elt)))
+                    .collect::<Vec<_>>(),
+            );
     }
 
     pub(crate) fn set_rlp_memory(&mut self, rlp: Vec<u8>) {
@@ -575,10 +561,6 @@ impl<F: Field> Interpreter<F> {
 
     pub(crate) fn incr(&mut self, n: usize) {
         self.generation_state.registers.program_counter += n;
-    }
-
-    pub(crate) fn push_memop(&mut self, mem_op: InterpreterMemOpKind) {
-        self.memops.push(mem_op);
     }
 
     pub(crate) fn stack(&self) -> Vec<U256> {
@@ -620,14 +602,17 @@ impl<F: Field> Interpreter<F> {
             let term = self
                 .generation_state
                 .memory
-                .get(MemoryAddress::new(0, segment, i));
+                .get_with_init(MemoryAddress::new(0, segment, i));
             output.push(term);
         }
         output
     }
 
     // Actually pushes in memory. Only used for tests.
+    #[cfg(test)]
     pub(crate) fn push(&mut self, x: U256) -> Result<(), ProgramError> {
+        use crate::cpu::stack::MAX_USER_STACK_SIZE;
+
         if !self.is_kernel() && self.stack_len() >= MAX_USER_STACK_SIZE {
             return Err(ProgramError::StackOverflow);
         }
@@ -646,7 +631,10 @@ impl<F: Field> Interpreter<F> {
     }
 
     /// Actually popping the memory. Only used in tests.
+    #[cfg(test)]
     pub(crate) fn pop(&mut self) -> Result<U256, ProgramError> {
+        use crate::witness::util::stack_peek;
+
         let result = stack_peek(&self.generation_state, 0);
 
         if self.stack_len() > 1 {
@@ -666,7 +654,7 @@ impl<F: Field> Interpreter<F> {
         KERNEL.offset_label(self.generation_state.registers.program_counter)
     }
 
-    fn get_jumpdest_bit(&self, offset: usize) -> U256 {
+    pub(crate) fn get_jumpdest_bit(&self, offset: usize) -> U256 {
         if self.generation_state.memory.contexts[self.context()].segments
             [Segment::JumpdestBits.unscale()]
         .content
@@ -676,7 +664,7 @@ impl<F: Field> Interpreter<F> {
             // Even though we are in the interpreter, `JumpdestBits` is not part of the
             // preinitialized segments, so we don't need to carry out the additional checks
             // when get the value from memory.
-            self.generation_state.memory.get(MemoryAddress {
+            self.generation_state.memory.get_with_init(MemoryAddress {
                 context: self.context(),
                 segment: Segment::JumpdestBits.unscale(),
                 virt: offset,
@@ -739,12 +727,11 @@ impl<F: Field> Interpreter<F> {
         self.generation_state.registers.context = context;
     }
 
-    /// Writes the encoding of 0 to position @ENCODED_EMPTY_NODE_POS.
+    /// Writes the encoding of 0 at @ENCODED_EMPTY_NODE_ADDR.
     pub(crate) fn initialize_rlp_segment(&mut self) {
-        self.generation_state.memory.set(
-            MemoryAddress::new(0, Segment::RlpRaw, 0xFFFFFFFF),
-            128.into(),
-        )
+        self.generation_state
+            .memory
+            .set(MemoryAddress::new(0, Segment::RlpRaw, 0), 0x80.into())
     }
 }
 
@@ -757,6 +744,10 @@ impl<F: Field> State<F> for Interpreter<F> {
             registers: self.generation_state.registers,
             traces: self.generation_state.traces.checkpoint(),
         }
+    }
+
+    fn is_generation(&mut self) -> bool {
+        false
     }
 
     fn insert_preinitialized_segment(&mut self, segment: Segment, values: MemorySegmentState) {
@@ -788,7 +779,7 @@ impl<F: Field> State<F> for Interpreter<F> {
     }
 
     fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
-        self.generation_state.memory.get(address)
+        self.generation_state.memory.get_with_init(address)
     }
 
     fn get_mut_generation_state(&mut self) -> &mut GenerationState<F> {
@@ -866,17 +857,6 @@ impl<F: Field> State<F> for Interpreter<F> {
         }
 
         self.perform_state_op(opcode, op, row)
-    }
-
-    fn clear_traces(&mut self) {
-        let generation_state = self.get_mut_generation_state();
-        generation_state.traces.arithmetic_ops = vec![];
-        generation_state.traces.arithmetic_ops = vec![];
-        generation_state.traces.byte_packing_ops = vec![];
-        generation_state.traces.cpu = vec![];
-        generation_state.traces.logic_ops = vec![];
-        generation_state.traces.keccak_inputs = vec![];
-        generation_state.traces.keccak_sponge_ops = vec![];
     }
 }
 
@@ -1116,19 +1096,8 @@ fn get_mnemonic(opcode: u8) -> &'static str {
     }
 }
 
-macro_rules! unpack_address {
-    ($addr:ident) => {{
-        let offset = $addr.low_u32() as usize;
-        let segment = Segment::all()[($addr >> SEGMENT_SCALING_FACTOR).low_u32() as usize];
-        let context = ($addr >> CONTEXT_SCALING_FACTOR).low_u32() as usize;
-        (context, segment, offset)
-    }};
-}
-pub(crate) use unpack_address;
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
 
     use ethereum_types::U256;
     use plonky2::field::goldilocks_field::GoldilocksField as F;
