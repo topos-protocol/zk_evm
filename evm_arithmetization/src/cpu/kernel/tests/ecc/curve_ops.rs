@@ -210,14 +210,11 @@ mod bn {
 
         let mut computed_table = Vec::new();
         for i in 0..32 {
-            computed_table.push(int.generation_state.memory.get(
-                MemoryAddress {
-                    context: 0,
-                    segment: Segment::BnTableQ.unscale(),
-                    virt: i,
-                },
-                &HashMap::default(),
-            ));
+            computed_table.push(int.generation_state.memory.get(MemoryAddress {
+                context: 0,
+                segment: Segment::BnTableQ.unscale(),
+                virt: i,
+            }));
         }
 
         let table = u256ify([

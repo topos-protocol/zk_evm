@@ -19,8 +19,8 @@ use crate::memory::segments::Segment;
 use crate::util::u256_to_usize;
 use crate::witness::errors::ProgramError;
 use crate::witness::memory::MemoryChannel::GeneralPurpose;
-use crate::witness::memory::MemoryOpKind;
 use crate::witness::memory::{MemoryAddress, MemoryOp, MemoryState};
+use crate::witness::memory::{MemoryOpKind, MemorySegmentState};
 use crate::witness::operation::{generate_exception, Operation};
 use crate::witness::state::RegistersState;
 use crate::witness::traces::{TraceCheckpoint, Traces};
@@ -84,6 +84,12 @@ pub(crate) trait State<F: Field> {
 
     /// Return the offsets at which execution must halt
     fn get_halt_offsets(&self) -> Vec<usize>;
+
+    /// Inserts a preinitialized segment, given as a [Segment],
+    /// into the `preinitialized_segments` memory field.
+    fn insert_preinitialized_segment(&mut self, segment: Segment, values: MemorySegmentState);
+
+    fn is_preinitialized_segment(&self, segment: usize) -> bool;
 
     /// Simulates a CPU. It only generates the traces if the `State` is a
     /// `GenerationState`. Otherwise, it simply simulates all ooperations.
@@ -328,8 +334,7 @@ impl<F: Field> GenerationState<F> {
         let returndata_offset = ContextMetadata::ReturndataSize.unscale();
         let returndata_size_addr =
             MemoryAddress::new(ctx, Segment::ContextMetadata, returndata_offset);
-        let returndata_size =
-            u256_to_usize(self.memory.get(returndata_size_addr, &HashMap::default()))?;
+        let returndata_size = u256_to_usize(self.memory.get(returndata_size_addr))?;
         let code = self.memory.contexts[ctx].segments[Segment::Returndata.unscale()].content
             [..returndata_size]
             .iter()
@@ -383,6 +388,16 @@ impl<F: Field> State<F> for GenerationState<F> {
         }
     }
 
+    fn insert_preinitialized_segment(&mut self, segment: Segment, values: MemorySegmentState) {
+        panic!(
+            "A `GenerationState` cannot have a nonempty `preinitialized_segment` field in memory."
+        )
+    }
+
+    fn is_preinitialized_segment(&self, segment: usize) -> bool {
+        false
+    }
+
     /// Increments the `gas_used` register by a value `n`.
     fn incr_gas(&mut self, n: u64) {
         self.registers.gas_used += n;
@@ -405,18 +420,13 @@ impl<F: Field> State<F> for GenerationState<F> {
 
     /// Returns the value stored at address `address` in a `State`.
     fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
-        self.memory.get(address, &HashMap::default())
+        self.memory.get(address)
     }
 
     /// Returns a mutable `GenerationState` from a `State`.
     fn get_mut_generation_state(&mut self) -> &mut GenerationState<F> {
         self
     }
-
-    // /// Returns true if a `State` is a `GenerationState` and false otherwise.
-    // fn is_generation_state(&mut self) -> bool {
-    //     true
-    // }
 
     /// Increments the clock of an `Interpreter`'s clock.
     fn incr_interpreter_clock(&mut self) {}
@@ -502,12 +512,6 @@ impl<F: Field> State<F> for GenerationState<F> {
 impl<F: Field> Transition<F> for GenerationState<F> {
     fn skip_if_necessary(&mut self, op: Operation) -> Result<Operation, ProgramError> {
         Ok(op)
-    }
-
-    fn get_preinitialized_segments(
-        &self,
-    ) -> HashMap<Segment, crate::witness::memory::MemorySegmentState> {
-        HashMap::default()
     }
 
     fn generate_jumpdest_analysis(&mut self, dst: usize) -> bool {

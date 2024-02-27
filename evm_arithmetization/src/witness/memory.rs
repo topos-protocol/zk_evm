@@ -165,6 +165,7 @@ impl MemoryOp {
 #[derive(Clone, Debug)]
 pub(crate) struct MemoryState {
     pub(crate) contexts: Vec<MemoryContextState>,
+    preinitialized_segments: HashMap<Segment, MemorySegmentState>,
 }
 
 impl MemoryState {
@@ -220,20 +221,22 @@ impl MemoryState {
         Some(val)
     }
 
-    pub(crate) fn get(
-        &self,
-        address: MemoryAddress,
-        preinitialized_segments: &HashMap<Segment, MemorySegmentState, RandomState>,
-    ) -> U256 {
+    pub(crate) fn get(&self, address: MemoryAddress) -> U256 {
         match self.get_option(address) {
             Some(val) => val,
             None => {
                 let segment = Segment::all()[address.segment];
                 let offset = address.virt;
-                if preinitialized_segments.contains_key(&segment)
-                    && offset < preinitialized_segments.get(&segment).unwrap().content.len()
+                if self.preinitialized_segments.contains_key(&segment)
+                    && offset
+                        < self
+                            .preinitialized_segments
+                            .get(&segment)
+                            .unwrap()
+                            .content
+                            .len()
                 {
-                    preinitialized_segments.get(&segment).unwrap().content[offset].unwrap()
+                    self.preinitialized_segments.get(&segment).unwrap().content[offset].unwrap()
                 } else {
                     0.into()
                 }
@@ -268,10 +271,34 @@ impl MemoryState {
 
     // These fields are already scaled by their respective segment.
     pub(crate) fn read_global_metadata(&self, field: GlobalMetadata) -> U256 {
-        self.get(
-            MemoryAddress::new_bundle(U256::from(field as usize)).unwrap(),
-            &HashMap::default(),
-        )
+        self.get(MemoryAddress::new_bundle(U256::from(field as usize)).unwrap())
+    }
+
+    /// Inserts a segment and its preinitialized values in
+    /// `preinitialized_segments`.
+    pub(crate) fn insert_preinitialized_segment(
+        &mut self,
+        segment: Segment,
+        values: MemorySegmentState,
+    ) {
+        self.preinitialized_segments.insert(segment, values);
+    }
+
+    /// Returns a boolean which indicates whether a segment (given as a usize)
+    /// is part of the `preinitialize_segments`.
+    pub(crate) fn is_preinitialized_segment(&self, segment: usize) -> bool {
+        if let Some(seg) = Segment::all().get(segment) {
+            self.preinitialized_segments.contains_key(&seg)
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn get_preinitialized_segment(
+        &self,
+        segment: Segment,
+    ) -> Option<&MemorySegmentState> {
+        self.preinitialized_segments.get(&segment)
     }
 }
 
@@ -280,6 +307,7 @@ impl Default for MemoryState {
         Self {
             // We start with an initial context for the kernel.
             contexts: vec![MemoryContextState::default()],
+            preinitialized_segments: HashMap::default(),
         }
     }
 }

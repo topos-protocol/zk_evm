@@ -57,7 +57,6 @@ pub(crate) struct Interpreter<F: Field> {
     pub(crate) opcode_count: [usize; 0x100],
     memops: Vec<InterpreterMemOpKind>,
     jumpdest_table: HashMap<usize, BTreeSet<usize>>,
-    pub(crate) preinitialized_segments: HashMap<Segment, MemorySegmentState>,
     pub(crate) is_jumpdest_analysis: bool,
     pub(crate) clock: usize,
 }
@@ -174,7 +173,6 @@ impl<F: Field> Interpreter<F> {
             opcode_count: [0; 256],
             memops: vec![],
             jumpdest_table: HashMap::new(),
-            preinitialized_segments: HashMap::default(),
             is_jumpdest_analysis: false,
             clock: 0,
         };
@@ -206,7 +204,6 @@ impl<F: Field> Interpreter<F> {
             opcode_count: [0; 256],
             memops: vec![],
             jumpdest_table: HashMap::new(),
-            preinitialized_segments: HashMap::new(),
             is_jumpdest_analysis: true,
             clock: 0,
         }
@@ -240,8 +237,7 @@ impl<F: Field> Interpreter<F> {
         let preinit_trie_data_segment = MemorySegmentState {
             content: trie_data.iter().map(|&elt| Some(elt)).collect::<Vec<_>>(),
         };
-        self.preinitialized_segments
-            .insert(Segment::TrieData, preinit_trie_data_segment);
+        self.insert_preinitialized_segment(Segment::TrieData, preinit_trie_data_segment);
 
         // Update the RLP and withdrawal prover inputs.
         let rlp_prover_inputs =
@@ -356,10 +352,7 @@ impl<F: Field> Interpreter<F> {
             match kind {
                 MemoryOpKind::Read => {
                     if self.generation_state.memory.get_option(address).is_none() {
-                        if !self
-                            .preinitialized_segments
-                            .contains_key(&Segment::all()[address.segment])
-                        {
+                        if !self.is_preinitialized_segment(address.segment) {
                             assert_eq!(
                                 value,
                                 0.into(),
@@ -477,7 +470,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     pub(crate) fn get_memory_segment(&self, segment: Segment) -> Vec<U256> {
-        if self.preinitialized_segments.contains_key(&segment) {
+        if self.is_preinitialized_segment(segment.unscale()) {
             let total_len = self.generation_state.memory.contexts[0].segments[segment.unscale()]
                 .content
                 .len();
@@ -490,7 +483,14 @@ impl<F: Field> Interpreter<F> {
                     })
                     .collect::<Vec<U256>>()
             };
-            let mut res = get_vals(&self.preinitialized_segments.get(&segment).unwrap().content);
+            let mut res = get_vals(
+                &self
+                    .generation_state
+                    .memory
+                    .get_preinitialized_segment(segment)
+                    .unwrap()
+                    .content,
+            );
             let init_len = res.len();
             res.extend(&get_vals(
                 &self.generation_state.memory.contexts[0].segments[segment.unscale()].content
@@ -617,10 +617,10 @@ impl<F: Field> Interpreter<F> {
     pub(crate) fn extract_kernel_memory(self, segment: Segment, range: Range<usize>) -> Vec<U256> {
         let mut output: Vec<U256> = Vec::with_capacity(range.end);
         for i in range {
-            let term = self.generation_state.memory.get(
-                MemoryAddress::new(0, segment, i),
-                &self.preinitialized_segments,
-            );
+            let term = self
+                .generation_state
+                .memory
+                .get(MemoryAddress::new(0, segment, i));
             output.push(term);
         }
         output
@@ -676,14 +676,11 @@ impl<F: Field> Interpreter<F> {
             // Even though we are in the interpreter, `JumpdestBits` is not part of the
             // preinitialized segments, so we don't need to carry out the additional checks
             // when get the value from memory.
-            self.generation_state.memory.get(
-                MemoryAddress {
-                    context: self.context(),
-                    segment: Segment::JumpdestBits.unscale(),
-                    virt: offset,
-                },
-                &HashMap::default(),
-            )
+            self.generation_state.memory.get(MemoryAddress {
+                context: self.context(),
+                segment: Segment::JumpdestBits.unscale(),
+                virt: offset,
+            })
         } else {
             0.into()
         }
@@ -762,6 +759,18 @@ impl<F: Field> State<F> for Interpreter<F> {
         }
     }
 
+    fn insert_preinitialized_segment(&mut self, segment: Segment, values: MemorySegmentState) {
+        self.generation_state
+            .memory
+            .insert_preinitialized_segment(segment, values);
+    }
+
+    fn is_preinitialized_segment(&self, segment: usize) -> bool {
+        self.generation_state
+            .memory
+            .is_preinitialized_segment(segment)
+    }
+
     fn incr_gas(&mut self, n: u64) {
         self.generation_state.incr_gas(n);
     }
@@ -779,9 +788,7 @@ impl<F: Field> State<F> for Interpreter<F> {
     }
 
     fn get_from_memory(&mut self, address: MemoryAddress) -> U256 {
-        self.generation_state
-            .memory
-            .get(address, &self.preinitialized_segments)
+        self.generation_state.memory.get(address)
     }
 
     fn get_mut_generation_state(&mut self) -> &mut GenerationState<F> {
@@ -902,10 +909,6 @@ impl<F: Field> Transition<F> for Interpreter<F> {
         } else {
             Ok(op)
         }
-    }
-
-    fn get_preinitialized_segments(&self) -> HashMap<Segment, MemorySegmentState> {
-        self.preinitialized_segments.clone()
     }
 
     fn fill_stack_fields(

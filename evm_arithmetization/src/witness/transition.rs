@@ -40,8 +40,7 @@ pub(crate) fn read_code_memory<F: Field>(
     row.code_context = F::from_canonical_usize(code_context);
 
     let address = MemoryAddress::new(code_context, Segment::Code, state.registers.program_counter);
-    let (opcode, mem_log) =
-        mem_read_code_with_log_and_fill(address, state, row, false, &HashMap::default());
+    let (opcode, mem_log) = mem_read_code_with_log_and_fill(address, state, row, false);
 
     state.traces.push_memory(mem_log);
 
@@ -347,9 +346,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
 
         if !self.generate_jumpdest_analysis(dst as usize) {
             let gen_state = self.get_mut_generation_state();
-            // Even though we might be in the interpreter, `JumpdestBits` is not part
-            // preinitialized segments, so we don't need to carry out the additional checks
-            // when get the value from memory.
             let (jumpdest_bit, jumpdest_bit_log) = mem_read_gp_with_log_and_fill(
                 NUM_GP_CHANNELS - 1,
                 MemoryAddress::new(
@@ -359,7 +355,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
                 ),
                 gen_state,
                 &mut row,
-                &HashMap::default(),
             );
 
             row.mem_channels[1].value[0] = F::ONE;
@@ -423,9 +418,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
         }
 
         let gen_state = self.get_mut_generation_state();
-        // Even though we might be in the interpreter, `JumpdestBits` is not part of the
-        // preinitialized segments, so we don't need to carry out the additional checks
-        // when get the value from memory.
         let (jumpdest_bit, jumpdest_bit_log) = mem_read_gp_with_log_and_fill(
             NUM_GP_CHANNELS - 1,
             MemoryAddress::new(
@@ -435,7 +427,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
             ),
             gen_state,
             &mut row,
-            &HashMap::default(),
         );
         if !should_jump || gen_state.registers.is_kernel {
             // Don't actually do the read, just set the address, etc.
@@ -466,8 +457,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
     /// Skips the following instructions for some specific labels
     fn skip_if_necessary(&mut self, op: Operation) -> Result<Operation, ProgramError>;
 
-    fn get_preinitialized_segments(&self) -> HashMap<Segment, MemorySegmentState>;
-
     fn perform_op(
         &mut self,
         op: Operation,
@@ -475,7 +464,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
         row: CpuColumnsView<F>,
     ) -> Result<(), ProgramError> {
         let op = self.skip_if_necessary(op)?;
-        let preinitialized_segments = self.get_preinitialized_segments();
 
         #[cfg(debug_assertions)]
         if !self.get_registers().is_kernel {
@@ -522,9 +510,7 @@ pub(crate) trait Transition<F: Field>: State<F> {
             Operation::TernaryArithmetic(op) => {
                 generate_ternary_arithmetic_op(op, generation_state, row)?
             }
-            Operation::KeccakGeneral => {
-                generate_keccak_general(generation_state, row, &preinitialized_segments)?
-            }
+            Operation::KeccakGeneral => generate_keccak_general(generation_state, row)?,
             Operation::ProverInput => generate_prover_input(generation_state, row)?,
             Operation::Pop => generate_pop(generation_state, row)?,
             Operation::Jump => self.generate_jump(row)?,
@@ -533,14 +519,10 @@ pub(crate) trait Transition<F: Field>: State<F> {
             Operation::Jumpdest => generate_jumpdest(generation_state, row)?,
             Operation::GetContext => generate_get_context(generation_state, row)?,
             Operation::SetContext => generate_set_context(generation_state, row)?,
-            Operation::Mload32Bytes => {
-                generate_mload_32bytes(generation_state, row, &preinitialized_segments)?
-            }
+            Operation::Mload32Bytes => generate_mload_32bytes(generation_state, row)?,
             Operation::Mstore32Bytes(n) => generate_mstore_32bytes(n, generation_state, row)?,
             Operation::ExitKernel => generate_exit_kernel(generation_state, row)?,
-            Operation::MloadGeneral => {
-                generate_mload_general(generation_state, row, &preinitialized_segments)?
-            }
+            Operation::MloadGeneral => generate_mload_general(generation_state, row)?,
             Operation::MstoreGeneral => generate_mstore_general(generation_state, row)?,
         };
 
