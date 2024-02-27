@@ -312,7 +312,7 @@ pub fn generate_traces<F: RichField + Extendable<D>, const D: usize>(
 }
 
 fn simulate_cpu<F: Field>(state: &mut GenerationState<F>) -> anyhow::Result<()> {
-    state.run_cpu(true)?;
+    state.run_cpu()?;
 
     let pc = state.registers.program_counter;
     // Padding

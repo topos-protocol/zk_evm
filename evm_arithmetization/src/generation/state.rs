@@ -87,7 +87,11 @@ pub(crate) trait State<F: Field> {
 
     /// Simulates a CPU. It only generates the traces if the `State` is a
     /// `GenerationState`. Otherwise, it simply simulates all ooperations.
-    fn run_cpu(&mut self, is_generation: bool) -> anyhow::Result<()> {
+    fn run_cpu(&mut self) -> anyhow::Result<()>
+    where
+        Self: Transition<F>,
+        Self: Sized,
+    {
         let halt_offsets = self.get_halt_offsets();
 
         loop {
@@ -104,9 +108,7 @@ pub(crate) trait State<F: Field> {
                         return Ok(());
                     }
                 } else {
-                    if is_generation {
-                        log::info!("CPU halted after {} cycles", self.get_clock());
-                    }
+                    log::info!("CPU halted after {} cycles", self.get_clock());
                     return Ok(());
                 }
             }
@@ -118,7 +120,11 @@ pub(crate) trait State<F: Field> {
         Ok(())
     }
 
-    fn handle_error(&mut self, err: ProgramError) -> anyhow::Result<()> {
+    fn handle_error(&mut self, err: ProgramError) -> anyhow::Result<()>
+    where
+        Self: Transition<F>,
+        Self: Sized,
+    {
         let exc_code: u8 = match err {
             ProgramError::OutOfGas => 0,
             ProgramError::InvalidOpcode => 1,
@@ -132,7 +138,7 @@ pub(crate) trait State<F: Field> {
         let checkpoint = self.checkpoint();
 
         let (row, _) = self.base_row();
-        generate_exception(exc_code, self.get_mut_generation_state(), row);
+        generate_exception(exc_code, self, row);
 
         self.clear_traces();
 
@@ -141,7 +147,11 @@ pub(crate) trait State<F: Field> {
         Ok(())
     }
 
-    fn transition(&mut self) -> anyhow::Result<()> {
+    fn transition(&mut self) -> anyhow::Result<()>
+    where
+        Self: Transition<F>,
+        Self: Sized,
+    {
         let checkpoint = self.checkpoint();
         let result = self.try_perform_instruction();
 

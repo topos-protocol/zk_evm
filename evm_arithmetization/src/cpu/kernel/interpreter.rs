@@ -379,7 +379,7 @@ impl<F: Field> Interpreter<F> {
     }
 
     pub(crate) fn run(&mut self) -> Result<(), anyhow::Error> {
-        self.run_cpu(false)?;
+        self.run_cpu()?;
 
         #[cfg(debug_assertions)]
         {

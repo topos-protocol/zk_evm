@@ -474,7 +474,6 @@ pub(crate) trait Transition<F: Field>: State<F> {
         opcode: u8,
         row: CpuColumnsView<F>,
     ) -> Result<(), ProgramError> {
-        /// It may
         let op = self.skip_if_necessary(op)?;
         let preinitialized_segments = self.get_preinitialized_segments();
 
