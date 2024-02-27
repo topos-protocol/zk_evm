@@ -288,7 +288,7 @@ impl MemoryState {
     /// is part of the `preinitialize_segments`.
     pub(crate) fn is_preinitialized_segment(&self, segment: usize) -> bool {
         if let Some(seg) = Segment::all().get(segment) {
-            self.preinitialized_segments.contains_key(&seg)
+            self.preinitialized_segments.contains_key(seg)
         } else {
             false
         }
