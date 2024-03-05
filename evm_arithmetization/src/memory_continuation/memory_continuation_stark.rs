@@ -23,7 +23,7 @@ use plonky2_util::ceil_div_usize;
 use starky::constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsumer};
 use starky::evaluation_frame::{StarkEvaluationFrame, StarkFrame};
 use starky::lookup::{Column, Filter, Lookup};
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 
 use super::columns::{value_limb, ADDR_CONTEXT, ADDR_SEGMENT, ADDR_VIRTUAL, FILTER, NUM_COLUMNS};
 use crate::all_stark::EvmStarkFrame;
@@ -107,92 +107,4 @@ impl<F: RichField + Extendable<D>, const D: usize> MemoryContinuationStark<F, D>
     }
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for MemoryContinuationStark<F, D> {
-    type EvaluationFrame<FE, P, const D2: usize> = EvmStarkFrame<P, FE, NUM_COLUMNS>
-    where
-        FE: FieldExtension<D2, BaseField = F>,
-        P: PackedField<Scalar = FE>;
-
-    type EvaluationFrameTarget = EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_COLUMNS>;
-
-    fn eval_packed_generic<FE, P, const D2: usize>(
-        &self,
-        vars: &Self::EvaluationFrame<FE, P, D2>,
-        yield_constr: &mut ConstraintConsumer<P>,
-    ) where
-        FE: FieldExtension<D2, BaseField = F>,
-        P: PackedField<Scalar = FE>,
-    {
-        let local_values = vars.get_local_values();
-        // The filter must be binary.
-        let filter = local_values[FILTER];
-        yield_constr.constraint(filter * (filter - P::ONES));
-    }
-
-    fn eval_ext_circuit(
-        &self,
-        builder: &mut plonky2::plonk::circuit_builder::CircuitBuilder<F, D>,
-        vars: &Self::EvaluationFrameTarget,
-        yield_constr: &mut RecursiveConstraintConsumer<F, D>,
-    ) {
-        let local_values = vars.get_local_values();
-        // The filter must be binary.
-        let filter = local_values[FILTER];
-        let constr = builder.add_const_extension(filter, F::NEG_ONE);
-        let constr = builder.mul_extension(constr, filter);
-        yield_constr.constraint(builder, constr);
-    }
-
-    fn constraint_degree(&self) -> usize {
-        3
-    }
-
-    fn requires_ctls(&self) -> bool {
-        true
-    }
-
-    fn lookups(&self) -> Vec<Lookup<F>> {
-        vec![]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::borrow::Borrow;
-
-    use anyhow::Result;
-    use itertools::Itertools;
-    use keccak_hash::keccak;
-    use plonky2::field::goldilocks_field::GoldilocksField;
-    use plonky2::field::types::PrimeField64;
-    use plonky2::plonk::config::{GenericConfig, PoseidonGoldilocksConfig};
-    use starky::stark_testing::{test_stark_circuit_constraints, test_stark_low_degree};
-
-    use crate::keccak_sponge::columns::KeccakSpongeColumnsView;
-    use crate::keccak_sponge::keccak_sponge_stark::{KeccakSpongeOp, KeccakSpongeStark};
-    use crate::memory::segments::Segment;
-    use crate::memory_continuation::memory_continuation_stark::MemoryContinuationStark;
-    use crate::witness::memory::MemoryAddress;
-
-    #[test]
-    fn test_stark_degree() -> Result<()> {
-        const D: usize = 2;
-        type C = PoseidonGoldilocksConfig;
-        type F = <C as GenericConfig<D>>::F;
-        type S = MemoryContinuationStark<F, D>;
-
-        let stark = S::default();
-        test_stark_low_degree(stark)
-    }
-
-    #[test]
-    fn test_stark_circuit() -> Result<()> {
-        const D: usize = 2;
-        type C = PoseidonGoldilocksConfig;
-        type F = <C as GenericConfig<D>>::F;
-        type S = MemoryContinuationStark<F, D>;
-
-        let stark = S::default();
-        test_stark_circuit_constraints::<F, C, S, D>(stark)
-    }
-}
+impl<F: RichField + Extendable<D>, const D: usize> StarkTable for MemoryContinuationStark<F, D> {}
