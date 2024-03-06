@@ -7,7 +7,7 @@ use plonky2::hash::hash_types::RichField;
 use starky::config::StarkConfig;
 use starky::cross_table_lookup::{CrossTableLookup, TableIdx, TableWithColumns};
 use starky::evaluation_frame::StarkFrame;
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 
 use crate::arithmetic::arithmetic_stark;
 use crate::arithmetic::arithmetic_stark::ArithmeticStark;
@@ -104,6 +104,7 @@ impl Deref for Table {
 
 /// Number of STARK tables.
 pub(crate) const NUM_TABLES: usize = Table::MemAfter as usize + 1;
+pub(crate) const NUM_STARKS: usize = Table::Memory as usize + 1;
 
 impl Table {
     /// Returns all STARK table indices.

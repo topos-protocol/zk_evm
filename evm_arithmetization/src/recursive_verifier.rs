@@ -28,7 +28,7 @@ use starky::proof::{StarkProofTarget, StarkProofWithMetadata};
 use starky::recursive_verifier::{
     add_virtual_stark_proof, set_stark_proof_target, verify_stark_proof_with_challenges_circuit,
 };
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 
 use crate::all_stark::Table;
 use crate::cpu::kernel::aggregator::KERNEL;

@@ -26,9 +26,9 @@ use starky::evaluation_frame::StarkEvaluationFrame;
 use starky::lookup::{get_grand_product_challenge_set, GrandProductChallengeSet, Lookup};
 use starky::proof::{MultiProof, StarkProofWithMetadata};
 use starky::prover::prove_with_commitment;
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 
-use crate::all_stark::{AllStark, Table, NUM_TABLES};
+use crate::all_stark::{AllStark, Table, NUM_STARKS, NUM_TABLES};
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::interpreter::generate_segment;
 use crate::generation::state::GenerationState;
@@ -497,7 +497,7 @@ type ProofSingleWithCap<F, C, H, const D: usize> =
 /// - all the required polynomial and FRI argument openings.
 /// Returns the proof, along with the associated `MerkleCap`.
 pub(crate) fn prove_single_table<F, C, S, const D: usize>(
-    stark: &S,
+    table: &S,
     config: &StarkConfig,
     trace_poly_values: &[PolynomialValues<F>],
     trace_commitment: &PolynomialBatch<F, C, D>,
@@ -510,7 +510,7 @@ pub(crate) fn prove_single_table<F, C, S, const D: usize>(
 where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
-    S: Stark<F, D>,
+    S: StarkTable<F, D>,
 {
     check_abort_signal(abort_signal.clone())?;
 
@@ -518,7 +518,7 @@ where
     let init_challenger_state = challenger.compact();
 
     let proof = prove_with_commitment(
-        stark,
+        table,
         config,
         trace_poly_values,
         trace_commitment,

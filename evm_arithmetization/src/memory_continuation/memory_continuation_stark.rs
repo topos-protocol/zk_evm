@@ -107,4 +107,13 @@ impl<F: RichField + Extendable<D>, const D: usize> MemoryContinuationStark<F, D>
     }
 }
 
-impl<F: RichField + Extendable<D>, const D: usize> StarkTable for MemoryContinuationStark<F, D> {}
+impl<F: RichField + Extendable<D>, const D: usize> StarkTable<F, D>
+    for MemoryContinuationStark<F, D>
+{
+    type EvaluationFrame<FE, P, const D2: usize> = EvmStarkFrame<P, FE, NUM_COLUMNS>
+    where
+        FE: FieldExtension<D2, BaseField = F>,
+        P: PackedField<Scalar = FE>;
+
+    type EvaluationFrameTarget = EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_COLUMNS>;
+}

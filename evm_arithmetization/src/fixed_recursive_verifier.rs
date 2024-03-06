@@ -38,9 +38,9 @@ use starky::config::StarkConfig;
 use starky::cross_table_lookup::{verify_cross_table_lookups_circuit, CrossTableLookup};
 use starky::lookup::{get_grand_product_challenge_set_target, GrandProductChallengeSet};
 use starky::proof::StarkProofWithMetadata;
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 
-use crate::all_stark::{all_cross_table_lookups, AllStark, Table, NUM_TABLES};
+use crate::all_stark::{all_cross_table_lookups, AllStark, Table, NUM_STARKS, NUM_TABLES};
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::generation::state::GenerationState;
 use crate::generation::GenerationInputs;
@@ -100,7 +100,7 @@ where
     pub block: BlockCircuitData<F, C, D>,
     /// Holds chains of circuits for each table and for each initial
     /// `degree_bits`.
-    pub by_table: [RecursiveCircuitsForTable<F, C, D>; NUM_TABLES],
+    pub by_table: [RecursiveCircuitsForTable<F, C, D>; NUM_STARKS],
 }
 
 /// Data for the EVM root circuit, which is used to combine each STARK's shrunk
@@ -417,7 +417,7 @@ where
             BlockCircuitData::from_buffer(&mut buffer, gate_serializer, generator_serializer)?;
 
         let by_table = match skip_tables {
-            true => (0..NUM_TABLES)
+            true => (0..NUM_STARKS)
                 .map(|_| RecursiveCircuitsForTable {
                     by_stark_size: BTreeMap::default(),
                 })
@@ -427,7 +427,7 @@ where
             false => {
                 // Tricky use of MaybeUninit to remove the need for implementing Debug
                 // for all underlying types, necessary to convert a by_table Vec to an array.
-                let mut by_table: [MaybeUninit<RecursiveCircuitsForTable<F, C, D>>; NUM_TABLES] =
+                let mut by_table: [MaybeUninit<RecursiveCircuitsForTable<F, C, D>>; NUM_STARKS] =
                     unsafe { MaybeUninit::uninit().assume_init() };
                 for table in &mut by_table[..] {
                     let value = RecursiveCircuitsForTable::from_buffer(
@@ -438,7 +438,7 @@ where
                     *table = MaybeUninit::new(value);
                 }
                 unsafe {
-                    mem::transmute::<_, [RecursiveCircuitsForTable<F, C, D>; NUM_TABLES]>(by_table)
+                    mem::transmute::<_, [RecursiveCircuitsForTable<F, C, D>; NUM_STARKS]>(by_table)
                 }
             }
         };
@@ -525,20 +525,20 @@ where
             &all_stark.cross_table_lookups,
             stark_config,
         );
-        let mem_before = RecursiveCircuitsForTable::new(
-            Table::MemBefore,
-            &all_stark.mem_before_stark,
-            degree_bits_ranges[Table::MemBefore as usize].clone(),
-            &all_stark.cross_table_lookups,
-            stark_config,
-        );
-        let mem_after = RecursiveCircuitsForTable::new(
-            Table::MemAfter,
-            &all_stark.mem_after_stark,
-            degree_bits_ranges[Table::MemAfter as usize].clone(),
-            &all_stark.cross_table_lookups,
-            stark_config,
-        );
+        // let mem_before = RecursiveCircuitsForTable::new(
+        //     Table::MemBefore,
+        //     &all_stark.mem_before_stark,
+        //     degree_bits_ranges[Table::MemBefore as usize].clone(),
+        //     &all_stark.cross_table_lookups,
+        //     stark_config,
+        // );
+        // let mem_after = RecursiveCircuitsForTable::new(
+        //     Table::MemAfter,
+        //     &all_stark.mem_after_stark,
+        //     degree_bits_ranges[Table::MemAfter as usize].clone(),
+        //     &all_stark.cross_table_lookups,
+        //     stark_config,
+        // );
 
         let by_table = [
             arithmetic,
@@ -548,8 +548,6 @@ where
             keccak_sponge,
             logic,
             memory,
-            mem_before,
-            mem_after,
         ];
         let root = Self::create_segment_circuit(&by_table, stark_config);
         let segment_aggregation = Self::create_segmented_aggregation_circuit(&root);
@@ -585,7 +583,7 @@ where
     }
 
     fn create_segment_circuit(
-        by_table: &[RecursiveCircuitsForTable<F, C, D>; NUM_TABLES],
+        by_table: &[RecursiveCircuitsForTable<F, C, D>; NUM_STARKS],
         stark_config: &StarkConfig,
     ) -> RootCircuitData<F, C, D> {
         let inner_common_data: [_; NUM_TABLES] =

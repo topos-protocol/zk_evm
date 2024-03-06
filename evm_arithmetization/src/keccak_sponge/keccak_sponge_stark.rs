@@ -17,7 +17,7 @@ use plonky2_util::ceil_div_usize;
 use starky::constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsumer};
 use starky::evaluation_frame::StarkEvaluationFrame;
 use starky::lookup::{Column, Filter, Lookup};
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 
 use crate::all_stark::EvmStarkFrame;
 use crate::cpu::kernel::keccak_util::keccakf_u32s;
@@ -528,14 +528,6 @@ impl<F: RichField + Extendable<D>, const D: usize> KeccakSpongeStark<F, D> {
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for KeccakSpongeStark<F, D> {
-    type EvaluationFrame<FE, P, const D2: usize> = EvmStarkFrame<P, FE, NUM_KECCAK_SPONGE_COLUMNS>
-    where
-        FE: FieldExtension<D2, BaseField = F>,
-        P: PackedField<Scalar = FE>;
-
-    type EvaluationFrameTarget =
-        EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_KECCAK_SPONGE_COLUMNS>;
-
     fn eval_packed_generic<FE, P, const D2: usize>(
         &self,
         vars: &Self::EvaluationFrame<FE, P, D2>,
@@ -819,7 +811,16 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for KeccakSpongeS
         };
         yield_constr.constraint_transition(builder, constraint);
     }
+}
 
+impl<F: RichField + Extendable<D>, const D: usize> StarkTable<F, D> for KeccakSpongeStark<F, D> {
+    type EvaluationFrame<FE, P, const D2: usize> = EvmStarkFrame<P, FE, NUM_KECCAK_SPONGE_COLUMNS>
+    where
+        FE: FieldExtension<D2, BaseField = F>,
+        P: PackedField<Scalar = FE>;
+
+    type EvaluationFrameTarget =
+        EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_KECCAK_SPONGE_COLUMNS>;
     fn constraint_degree(&self) -> usize {
         3
     }

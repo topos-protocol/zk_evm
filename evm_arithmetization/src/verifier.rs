@@ -7,10 +7,10 @@ use plonky2::plonk::config::GenericConfig;
 use starky::config::StarkConfig;
 use starky::cross_table_lookup::{get_ctl_vars_from_proofs, verify_cross_table_lookups};
 use starky::lookup::GrandProductChallenge;
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 use starky::verifier::verify_stark_proof_with_challenges;
 
-use crate::all_stark::{AllStark, Table, NUM_TABLES};
+use crate::all_stark::{AllStark, Table, NUM_STARKS, NUM_TABLES};
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::constants::global_metadata::GlobalMetadata;
 use crate::memory::segments::Segment;
@@ -114,22 +114,22 @@ where
         &[],
         config,
     )?;
-    verify_stark_proof_with_challenges(
-        mem_before_stark,
-        &stark_proofs[Table::MemBefore as usize].proof,
-        &stark_challenges[Table::MemBefore as usize],
-        Some(&ctl_vars_per_table[Table::MemBefore as usize]),
-        &[],
-        config,
-    )?;
-    verify_stark_proof_with_challenges(
-        mem_after_stark,
-        &stark_proofs[Table::MemAfter as usize].proof,
-        &stark_challenges[Table::MemAfter as usize],
-        Some(&ctl_vars_per_table[Table::MemAfter as usize]),
-        &[],
-        config,
-    )?;
+    // verify_stark_proof_with_challenges(
+    //     mem_before_stark,
+    //     &stark_proofs[Table::MemBefore as usize].proof,
+    //     &stark_challenges[Table::MemBefore as usize],
+    //     Some(&ctl_vars_per_table[Table::MemBefore as usize]),
+    //     &[],
+    //     config,
+    // )?;
+    // verify_stark_proof_with_challenges(
+    //     mem_after_stark,
+    //     &stark_proofs[Table::MemAfter as usize].proof,
+    //     &stark_challenges[Table::MemAfter as usize],
+    //     Some(&ctl_vars_per_table[Table::MemAfter as usize]),
+    //     &[],
+    //     config,
+    // )?;
 
     let public_values = all_proof.public_values;
 

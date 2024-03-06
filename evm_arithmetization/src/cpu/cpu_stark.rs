@@ -12,7 +12,7 @@ use starky::constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsume
 use starky::cross_table_lookup::TableWithColumns;
 use starky::evaluation_frame::StarkEvaluationFrame;
 use starky::lookup::{Column, Filter};
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 
 use super::columns::CpuColumnsView;
 use super::halt;
@@ -486,14 +486,6 @@ pub(crate) struct CpuStark<F, const D: usize> {
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for CpuStark<F, D> {
-    type EvaluationFrame<FE, P, const D2: usize> = EvmStarkFrame<P, FE, NUM_CPU_COLUMNS>
-    where
-        FE: FieldExtension<D2, BaseField = F>,
-        P: PackedField<Scalar = FE>;
-
-    type EvaluationFrameTarget =
-        EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_CPU_COLUMNS>;
-
     /// Evaluates all CPU constraints.
     fn eval_packed_generic<FE, P, const D2: usize>(
         &self,
@@ -562,7 +554,16 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for CpuStark<F, D
         stack::eval_ext_circuit(builder, local_values, next_values, yield_constr);
         syscalls_exceptions::eval_ext_circuit(builder, local_values, next_values, yield_constr);
     }
+}
 
+impl<F: RichField + Extendable<D>, const D: usize> StarkTable<F, D> for CpuStark<F, D> {
+    type EvaluationFrame<FE, P, const D2: usize> = EvmStarkFrame<P, FE, NUM_CPU_COLUMNS>
+    where
+        FE: FieldExtension<D2, BaseField = F>,
+        P: PackedField<Scalar = FE>;
+
+    type EvaluationFrameTarget =
+        EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_CPU_COLUMNS>;
     fn constraint_degree(&self) -> usize {
         3
     }

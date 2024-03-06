@@ -22,7 +22,7 @@ use starky::config::StarkConfig;
 use starky::lookup::GrandProductChallengeSet;
 use starky::proof::{MultiProof, StarkProofChallenges};
 
-use crate::all_stark::NUM_TABLES;
+use crate::all_stark::{NUM_STARKS, NUM_TABLES};
 use crate::generation::mpt::TrieRootPtrs;
 use crate::generation::MemBeforeValues;
 use crate::util::{get_h160, get_h256, get_u256, h2u};
@@ -50,7 +50,7 @@ impl<F: RichField + Extendable<D>, C: GenericConfig<D, F = F>, const D: usize> A
 /// Randomness for all STARKs.
 pub(crate) struct AllProofChallenges<F: RichField + Extendable<D>, const D: usize> {
     /// Randomness used in each STARK proof.
-    pub stark_challenges: [StarkProofChallenges<F, D>; NUM_TABLES],
+    pub stark_challenges: [StarkProofChallenges<F, D>; NUM_STARKS],
     /// Randomness used for cross-table lookups. It is shared by all STARKs.
     pub ctl_challenges: GrandProductChallengeSet<F>,
 }

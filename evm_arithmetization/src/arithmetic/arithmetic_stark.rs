@@ -13,7 +13,7 @@ use starky::constraint_consumer::{ConstraintConsumer, RecursiveConstraintConsume
 use starky::cross_table_lookup::TableWithColumns;
 use starky::evaluation_frame::StarkEvaluationFrame;
 use starky::lookup::{Column, Filter, Lookup};
-use starky::stark::Stark;
+use starky::stark::{Stark, StarkTable};
 use static_assertions::const_assert;
 
 use super::columns::{op_flags, NUM_ARITH_COLUMNS};
@@ -193,14 +193,6 @@ impl<F: RichField, const D: usize> ArithmeticStark<F, D> {
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for ArithmeticStark<F, D> {
-    type EvaluationFrame<FE, P, const D2: usize> = EvmStarkFrame<P, FE, NUM_ARITH_COLUMNS>
-    where
-        FE: FieldExtension<D2, BaseField = F>,
-        P: PackedField<Scalar = FE>;
-
-    type EvaluationFrameTarget =
-        EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_ARITH_COLUMNS>;
-
     fn eval_packed_generic<FE, P, const D2: usize>(
         &self,
         vars: &Self::EvaluationFrame<FE, P, D2>,
@@ -313,6 +305,16 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for ArithmeticSta
         // Evaluate constraints for SHL and SHR operations.
         shift::eval_ext_circuit(builder, lv, nv, yield_constr);
     }
+}
+
+impl<F: RichField + Extendable<D>, const D: usize> StarkTable<F, D> for ArithmeticStark<F, D> {
+    type EvaluationFrame<FE, P, const D2: usize> = EvmStarkFrame<P, FE, NUM_ARITH_COLUMNS>
+    where
+        FE: FieldExtension<D2, BaseField = F>,
+        P: PackedField<Scalar = FE>;
+
+    type EvaluationFrameTarget =
+        EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_ARITH_COLUMNS>;
 
     fn constraint_degree(&self) -> usize {
         3
