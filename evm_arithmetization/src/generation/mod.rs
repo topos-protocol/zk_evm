@@ -356,6 +356,7 @@ pub fn generate_traces<F: RichField + Extendable<D>, const D: usize>(
         "Trace lengths (before padding): {:?}",
         state.traces.get_lengths()
     );
+    log::debug!("El camino del bien");
 
     let read_metadata = |field| state.memory.read_global_metadata(field);
     let trie_roots_before = TrieRoots {
@@ -402,6 +403,7 @@ pub fn generate_traces<F: RichField + Extendable<D>, const D: usize>(
             .traces
             .into_tables(all_stark, &memory_before, config, timing)
     );
+    log::debug!("DEguenenem");
     Ok((tables, public_values, final_values))
 }
 

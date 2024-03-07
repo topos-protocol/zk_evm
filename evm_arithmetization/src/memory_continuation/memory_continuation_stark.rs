@@ -116,4 +116,8 @@ impl<F: RichField + Extendable<D>, const D: usize> StarkTable<F, D>
         P: PackedField<Scalar = FE>;
 
     type EvaluationFrameTarget = EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_COLUMNS>;
+
+    fn requires_ctls(&self) -> bool {
+        true
+    }
 }

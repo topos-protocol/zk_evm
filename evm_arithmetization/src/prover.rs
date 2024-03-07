@@ -25,7 +25,7 @@ use starky::cross_table_lookup::{get_ctl_data, CtlData};
 use starky::evaluation_frame::StarkEvaluationFrame;
 use starky::lookup::{get_grand_product_challenge_set, GrandProductChallengeSet, Lookup};
 use starky::proof::{MultiProof, StarkProofWithMetadata};
-use starky::prover::prove_with_commitment;
+use starky::prover::{prove_stark_with_commitment, prove_table_with_commitment};
 use starky::stark::{Stark, StarkTable};
 
 use crate::all_stark::{AllStark, Table, NUM_STARKS, NUM_TABLES};
@@ -317,10 +317,11 @@ where
     F: RichField + Extendable<D>,
     C: GenericConfig<D, F = F>,
 {
+    log::debug!("Aca si");
     let (arithmetic_proof, arithmetic_cap) = timed!(
         timing,
         "prove Arithmetic STARK",
-        prove_single_table(
+        prove_single_stark(
             &all_stark.arithmetic_stark,
             config,
             &trace_poly_values[Table::Arithmetic as usize],
@@ -332,10 +333,11 @@ where
             abort_signal.clone(),
         )?
     );
+    log::debug!("Aca no");
     let (byte_packing_proof, bp_cap) = timed!(
         timing,
         "prove byte packing STARK",
-        prove_single_table(
+        prove_single_stark(
             &all_stark.byte_packing_stark,
             config,
             &trace_poly_values[Table::BytePacking as usize],
@@ -347,10 +349,11 @@ where
             abort_signal.clone(),
         )?
     );
+    log::debug!("La gata");
     let (cpu_proof, cpu_cap) = timed!(
         timing,
         "prove CPU STARK",
-        prove_single_table(
+        prove_single_stark(
             &all_stark.cpu_stark,
             config,
             &trace_poly_values[Table::Cpu as usize],
@@ -365,7 +368,7 @@ where
     let (keccak_proof, keccak_cap) = timed!(
         timing,
         "prove Keccak STARK",
-        prove_single_table(
+        prove_single_stark(
             &all_stark.keccak_stark,
             config,
             &trace_poly_values[Table::Keccak as usize],
@@ -380,7 +383,7 @@ where
     let (keccak_sponge_proof, keccak_sponge_cap) = timed!(
         timing,
         "prove Keccak sponge STARK",
-        prove_single_table(
+        prove_single_stark(
             &all_stark.keccak_sponge_stark,
             config,
             &trace_poly_values[Table::KeccakSponge as usize],
@@ -395,7 +398,7 @@ where
     let (logic_proof, logic_cap) = timed!(
         timing,
         "prove logic STARK",
-        prove_single_table(
+        prove_single_stark(
             &all_stark.logic_stark,
             config,
             &trace_poly_values[Table::Logic as usize],
@@ -410,7 +413,7 @@ where
     let (memory_proof, mem_cap) = timed!(
         timing,
         "prove memory STARK",
-        prove_single_table(
+        prove_single_stark(
             &all_stark.memory_stark,
             config,
             &trace_poly_values[Table::Memory as usize],
@@ -422,6 +425,7 @@ where
             abort_signal.clone(),
         )?
     );
+    log::debug!("Acuerdate de eliminar todos estos debugs");
     let (mem_before_proof, mem_before_cap) = timed!(
         timing,
         "prove mem_before STARK",
@@ -496,6 +500,51 @@ type ProofSingleWithCap<F, C, H, const D: usize> =
 /// - all the requires Merkle caps,
 /// - all the required polynomial and FRI argument openings.
 /// Returns the proof, along with the associated `MerkleCap`.
+pub(crate) fn prove_single_stark<F, C, S, const D: usize>(
+    table: &S,
+    config: &StarkConfig,
+    trace_poly_values: &[PolynomialValues<F>],
+    trace_commitment: &PolynomialBatch<F, C, D>,
+    ctl_data: &CtlData<F>,
+    ctl_challenges: &GrandProductChallengeSet<F>,
+    challenger: &mut Challenger<F, C::Hasher>,
+    timing: &mut TimingTree,
+    abort_signal: Option<Arc<AtomicBool>>,
+) -> Result<ProofSingleWithCap<F, C, C::Hasher, D>>
+where
+    F: RichField + Extendable<D>,
+    C: GenericConfig<D, F = F>,
+    S: Stark<F, D>,
+{
+    check_abort_signal(abort_signal.clone())?;
+
+    // Clear buffered outputs.
+    let init_challenger_state = challenger.compact();
+
+    let proof = prove_stark_with_commitment(
+        table,
+        config,
+        trace_poly_values,
+        trace_commitment,
+        Some(ctl_data),
+        Some(ctl_challenges),
+        challenger,
+        &[],
+        timing,
+    )
+    .map(|proof_with_pis| StarkProofWithMetadata {
+        proof: proof_with_pis.proof,
+        init_challenger_state,
+    })?;
+
+    Ok((proof, trace_commitment.merkle_tree.cap.clone()))
+}
+
+/// Computes a proof for a single STARK table, including:
+/// - the initial state of the challenger,
+/// - all the requires Merkle caps,
+/// - all the required polynomial and FRI argument openings.
+/// Returns the proof, along with the associated `MerkleCap`.
 pub(crate) fn prove_single_table<F, C, S, const D: usize>(
     table: &S,
     config: &StarkConfig,
@@ -517,7 +566,7 @@ where
     // Clear buffered outputs.
     let init_challenger_state = challenger.compact();
 
-    let proof = prove_with_commitment(
+    let proof = prove_table_with_commitment(
         table,
         config,
         trace_poly_values,
