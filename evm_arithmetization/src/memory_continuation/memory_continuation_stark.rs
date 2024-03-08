@@ -116,36 +116,8 @@ impl<F: RichField + Extendable<D>, const D: usize> Stark<F, D> for MemoryContinu
 
     type EvaluationFrameTarget = EvmStarkFrame<ExtensionTarget<D>, ExtensionTarget<D>, NUM_COLUMNS>;
 
-    fn eval_packed_generic<FE, P, const D2: usize>(
-        &self,
-        vars: &Self::EvaluationFrame<FE, P, D2>,
-        yield_constr: &mut ConstraintConsumer<P>,
-    ) where
-        FE: FieldExtension<D2, BaseField = F>,
-        P: PackedField<Scalar = FE>,
-    {
-        let local_values = vars.get_local_values();
-        // The filter must be binary.
-        let filter = local_values[FILTER];
-        yield_constr.constraint(filter * (filter - P::ONES));
-    }
-
-    fn eval_ext_circuit(
-        &self,
-        builder: &mut plonky2::plonk::circuit_builder::CircuitBuilder<F, D>,
-        vars: &Self::EvaluationFrameTarget,
-        yield_constr: &mut RecursiveConstraintConsumer<F, D>,
-    ) {
-        let local_values = vars.get_local_values();
-        // The filter must be binary.
-        let filter = local_values[FILTER];
-        let constr = builder.add_const_extension(filter, F::NEG_ONE);
-        let constr = builder.mul_extension(constr, filter);
-        yield_constr.constraint(builder, constr);
-    }
-
     fn constraint_degree(&self) -> usize {
-        3
+        0
     }
 
     fn requires_ctls(&self) -> bool {
