@@ -6,6 +6,8 @@ use evm_arithmetization::{
 use mpt_trie::{nibbles::Nibbles, partial_trie::HashedPartialTrie};
 use serde::{Deserialize, Serialize};
 
+use crate::trace_protocol::BlockTrieRootsFinal;
+
 // TODO: Make these types in the doc comments point to the actual types...
 /// A type alias for `u64` of a block height.
 pub type BlockHeight = u64;
@@ -84,4 +86,6 @@ pub struct BlockLevelData {
     pub b_hashes: BlockHashes,
     /// Block withdrawal addresses and values.
     pub withdrawals: Vec<(Address, U256)>,
+    /// Block final tries.
+    pub final_tries: BlockTrieRootsFinal,
 }

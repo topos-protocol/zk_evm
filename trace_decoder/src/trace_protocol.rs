@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 
+use ethereum_types::H256;
 use ethereum_types::{Address, U256};
 use mpt_trie::partial_trie::HashedPartialTrie;
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,18 @@ pub enum BlockTraceTriePreImages {
     Separate(SeparateTriePreImages),
     /// The trie pre-image with combined state/storage tries.
     Combined(CombinedPreImages),
+}
+
+/// Final trie roots of the block.
+#[derive(Debug, Deserialize, Serialize, Default, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub struct BlockTrieRootsFinal {
+    /// State root.
+    pub state_root: H256,
+    /// Receipts root.
+    pub receipts_root: H256,
+    /// Txn root.
+    pub txn_root: H256,
 }
 
 /// State/Storage trie pre-images that are separate.

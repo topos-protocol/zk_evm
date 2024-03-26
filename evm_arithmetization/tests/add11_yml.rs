@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use env_logger::{try_init_from_env, Env, DEFAULT_FILTER_ENV};
 use ethereum_types::{Address, BigEndianHash, H256};
@@ -9,6 +9,7 @@ use evm_arithmetization::generation::mpt::{AccountRlp, LegacyReceiptRlp};
 use evm_arithmetization::generation::TrieInputs;
 use evm_arithmetization::proof::{BlockHashes, BlockMetadata, TrieRoots};
 use evm_arithmetization::prover::prove;
+use evm_arithmetization::prover::testing::simulate_all_segments_interpreter;
 use evm_arithmetization::verifier::verify_proof;
 use evm_arithmetization::{AllRecursiveCircuits, AllStark, GenerationInputs, Node};
 use hex_literal::hex;
@@ -219,53 +220,60 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
     );
 
     let mut timing = TimingTree::new("prove", log::Level::Debug);
-    let max_cpu_len_log = 14;
+    let max_cpu_len_log = 32;
 
-    let all_segment_proofs = all_circuits.prove_all_segments(
-        &all_stark,
-        &config,
-        inputs,
-        max_cpu_len_log,
-        &mut timing,
-        None,
-    )?;
+    let bytes = std::fs::read("block-eth-19240752.json").unwrap();
+    let inputs: Vec<GenerationInputs> = serde_json::from_slice(&bytes).unwrap();
+    let inputs = inputs[0].clone();
 
-    // We need at least two segments for aggregation.
-    assert!(all_segment_proofs.len() > 1);
+    let now = Instant::now();
+    simulate_all_segments_interpreter::<F>(inputs, max_cpu_len_log)?;
+    println!("elapsed: {:?}", now.elapsed().as_secs());
+    // let all_segment_proofs = all_circuits.prove_all_segments(
+    //     &all_stark,
+    //     &config,
+    //     inputs,
+    //     max_cpu_len_log,
+    //     &mut timing,
+    //     None,
+    // )?;
 
-    for segment_proof in &all_segment_proofs {
-        let ProverOutputData {
-            proof_with_pis: proof,
-            ..
-        } = segment_proof;
-        all_circuits.verify_root(proof.clone())?;
-    }
+    // // We need at least two segments for aggregation.
+    // assert!(all_segment_proofs.len() > 1);
 
-    let (mut aggreg_proof, mut aggreg_pv) = all_circuits.prove_segment_aggregation(
-        false,
-        &all_segment_proofs[0].proof_with_pis,
-        all_segment_proofs[0].public_values.clone(),
-        false,
-        &all_segment_proofs[1].proof_with_pis,
-        all_segment_proofs[1].public_values.clone(),
-    )?;
+    // for segment_proof in &all_segment_proofs {
+    //     let ProverOutputData {
+    //         proof_with_pis: proof,
+    //         ..
+    //     } = segment_proof;
+    //     all_circuits.verify_root(proof.clone())?;
+    // }
 
-    for seg in &all_segment_proofs[2..] {
-        let ProverOutputData {
-            proof_with_pis: proof,
-            public_values,
-        } = seg;
-        (aggreg_proof, aggreg_pv) = all_circuits.prove_segment_aggregation(
-            true,
-            &aggreg_proof,
-            aggreg_pv,
-            false,
-            proof,
-            public_values.clone(),
-        )?;
-    }
+    // let (mut aggreg_proof, mut aggreg_pv) =
+    // all_circuits.prove_segment_aggregation(     false,
+    //     &all_segment_proofs[0].proof_with_pis,
+    //     all_segment_proofs[0].public_values.clone(),
+    //     false,
+    //     &all_segment_proofs[1].proof_with_pis,
+    //     all_segment_proofs[1].public_values.clone(),
+    // )?;
 
-    let _ = all_circuits.prove_block(None, &aggreg_proof, aggreg_pv)?;
+    // for seg in &all_segment_proofs[2..] {
+    //     let ProverOutputData {
+    //         proof_with_pis: proof,
+    //         public_values,
+    //     } = seg;
+    //     (aggreg_proof, aggreg_pv) = all_circuits.prove_segment_aggregation(
+    //         true,
+    //         &aggreg_proof,
+    //         aggreg_pv,
+    //         false,
+    //         proof,
+    //         public_values.clone(),
+    //     )?;
+    // }
+
+    // let _ = all_circuits.prove_block(None, &aggreg_proof, aggreg_pv)?;
 
     Ok(())
 }

@@ -197,7 +197,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProcessedTxnInfo {
     pub(crate) nodes_used_by_txn: NodesUsedByTxn,
     pub(crate) contract_code_accessed: HashMap<CodeHash, Vec<u8>>,
@@ -373,7 +373,7 @@ pub(crate) type StorageAccess = Vec<HashedStorageAddrNibbles>;
 pub(crate) type StorageWrite = Vec<(HashedStorageAddrNibbles, Vec<u8>)>;
 
 /// Note that "*_accesses" includes writes.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct NodesUsedByTxn {
     pub(crate) state_accesses: Vec<HashedNodeAddr>,
     pub(crate) state_writes: Vec<(HashedAccountAddr, StateTrieWrites)>,
@@ -386,7 +386,7 @@ pub(crate) struct NodesUsedByTxn {
     pub(crate) self_destructed_accounts: Vec<HashedAccountAddr>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct StateTrieWrites {
     pub(crate) balance: Option<U256>,
     pub(crate) nonce: Option<U256>,
@@ -394,7 +394,7 @@ pub(crate) struct StateTrieWrites {
     pub(crate) code_hash: Option<CodeHash>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct TxnMetaState {
     pub(crate) txn_bytes: Option<Vec<u8>>,
     pub(crate) receipt_node_bytes: Vec<u8>,
