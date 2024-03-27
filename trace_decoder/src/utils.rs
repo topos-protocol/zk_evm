@@ -21,7 +21,7 @@ pub(crate) fn update_val_if_some<T>(target: &mut T, opt: Option<T>) {
 // TODO: Move under a feature flag...
 pub(crate) fn print_value_and_hash_nodes_of_trie(trie: &HashedPartialTrie) {
     let trie_elems = print_value_and_hash_nodes_of_trie_common(trie);
-    println!("State trie {:#?}", trie_elems);
+    // println!("State trie {:#?}", trie_elems);
 }
 
 // TODO: Move under a feature flag...
@@ -30,7 +30,7 @@ pub(crate) fn print_value_and_hash_nodes_of_storage_trie(
     trie: &HashedPartialTrie,
 ) {
     let trie_elems = print_value_and_hash_nodes_of_trie_common(trie);
-    println!("Storage trie for {:x}: {:#?}", s_trie_addr, trie_elems);
+    // println!("Storage trie for {:x}: {:#?}", s_trie_addr, trie_elems);
 }
 
 // TODO: Move under a feature flag...

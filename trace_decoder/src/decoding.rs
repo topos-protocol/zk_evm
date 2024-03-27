@@ -142,152 +142,142 @@ impl ProcessedBlockTrace {
 
         // A copy of the initial extra_data possibly needed during padding.
         let extra_data_for_dummies = extra_data.clone();
-        let final_gas_used = self
-            .txn_info
-            .clone()
-            .into_iter()
-            .fold(0, |acc, info| acc + info.meta.gas_used);
-        let txns = self
-            .txn_info
-            .clone()
-            .into_iter()
-            .filter_map(|info| info.meta.txn_bytes)
-            .collect::<Vec<_>>();
-        let mut contract_code = HashMap::default();
-        for txn in self.txn_info {
-            for (&contract_h, code) in &txn.contract_code_accessed {
-                contract_code.insert(contract_h, code.clone());
-            }
-        }
-
-        let trie_roots_after = other_data.b_data.final_tries;
-        let txn_gen_inputs = vec![GenerationInputs {
-            txn_number_before: extra_data.txn_number_before,
-            gas_used_before: extra_data.gas_used_before,
-            gas_used_after: final_gas_used.into(),
-            signed_txns: txns,
-            withdrawals: self.withdrawals, /* Only ever set in a dummy txn at the end of
-                                            * the block (see `[add_withdrawals_to_txns]`
-                                            * for more info). */
-            tries: initial_block_tries,
-            trie_roots_after: TrieRoots {
-                state_root: other_data.b_data.final_tries.state_root,
-                receipts_root: other_data.b_data.final_tries.receipts_root,
-                transactions_root: other_data.b_data.final_tries.txn_root,
-            },
-            checkpoint_state_trie_root: extra_data.checkpoint_state_trie_root,
-            contract_code,
-            block_metadata: other_data.b_data.b_meta.clone(),
-            block_hashes: other_data.b_data.b_hashes.clone(),
-        }];
-
-        // let mut txn_gen_inputs = self
+        // let final_gas_used = self
         //     .txn_info
+        //     .clone()
         //     .into_iter()
-        //     .enumerate()
-        //     .map(|(txn_idx, txn_info)| {
-        //         trace!("Generating proof IR for txn {}...", txn_idx);
-
-        //         Self::init_any_needed_empty_storage_tries(
-        //             &mut curr_block_tries.storage,
-        //             txn_info
-        //                 .nodes_used_by_txn
-        //                 .storage_accesses
-        //                 .iter()
-        //                 .map(|(k, _)| k),
-        //             &txn_info
-        //                 .nodes_used_by_txn
-        //                 .state_accounts_with_no_accesses_but_storage_tries,
-        //         );
-        //         // For each non-dummy txn, we increment `txn_number_after` by 1, and
-        //         // update `gas_used_after` accordingly.
-        //         extra_data.txn_number_after += U256::one();
-        //         extra_data.gas_used_after += txn_info.meta.gas_used.into();
-
-        //         // Because we need to run delta application before creating the
-        // minimal         // sub-tries (we need to detect if deletes collapsed
-        // any branches), we need to         // do this clone every iteration.
-        //         let tries_at_start_of_txn = curr_block_tries.clone();
-
-        //         // Self::update_txn_and_receipt_tries(&mut curr_block_tries,
-        // &txn_info.meta,         // txn_idx);
-
-        //         let delta_out = Self::apply_deltas_to_trie_state(
-        //             &mut curr_block_tries,
-        //             &txn_info.nodes_used_by_txn,
-        //             &txn_info.meta,
-        //         )?;
-
-        //         // let tries = Self::create_minimal_partial_tries_needed_by_txn(
-        //         //     &tries_at_start_of_txn,
-        //         //     &txn_info.nodes_used_by_txn,
-        //         //     txn_idx,
-        //         //     delta_out,
-        //         //     &other_data.b_data.b_meta.block_beneficiary,
-        //         // )?;
-        //         let tries = TrieInputs {
-        //             state_trie: tries_at_start_of_txn.state,
-        //             transactions_trie: tries_at_start_of_txn.txn,
-        //             receipts_trie: tries_at_start_of_txn.receipt,
-        //             storage_tries: tries_at_start_of_txn
-        //                 .storage
-        //                 .iter()
-        //                 .map(|(&h, v)| (h, v.clone()))
-        //                 .collect::<Vec<_>>(),
-        //         };
-
-        //         let trie_roots_after =
-        // calculate_trie_input_hashes(&curr_block_tries);         let
-        // gen_inputs = GenerationInputs {             txn_number_before:
-        // extra_data.txn_number_before,             gas_used_before:
-        // extra_data.gas_used_before,             gas_used_after:
-        // extra_data.gas_used_after,             signed_txns: if let
-        // Some(txn_bytes) = txn_info.meta.txn_bytes {
-        // vec![txn_bytes]             } else {
-        //                 vec![]
-        //             },
-        //             withdrawals: Vec::default(), /* Only ever set in a dummy txn at
-        // the end of
-        //                                           * the block (see
-        //                                             `[add_withdrawals_to_txns]`
-        //                                           * for more info). */
-        //             tries,
-        //             trie_roots_after,
-        //             checkpoint_state_trie_root:
-        // extra_data.checkpoint_state_trie_root,             contract_code:
-        // txn_info.contract_code_accessed,             block_metadata:
-        // other_data.b_data.b_meta.clone(),             block_hashes:
-        // other_data.b_data.b_hashes.clone(),         };
-
-        //         // After processing a transaction, we update the remaining
-        // accumulators         // for the next transaction.
-        //         extra_data.txn_number_before += U256::one();
-        //         extra_data.gas_used_before = extra_data.gas_used_after;
-
-        //         Ok(gen_inputs)
-        //     })
-        //     .collect::<TraceParsingResult<Vec<_>>>()?;
-
-        // let dummies_added = Self::pad_gen_inputs_with_dummy_inputs_if_needed(
-        //     &mut txn_gen_inputs,
-        //     &other_data,
-        //     &extra_data,
-        //     &extra_data_for_dummies,
-        //     &initial_tries_for_dummies,
-        //     &curr_block_tries,
-        //     !self.withdrawals.is_empty(),
-        // );
-
-        // if !self.withdrawals.is_empty() {
-        //     Self::add_withdrawals_to_txns(
-        //         &mut txn_gen_inputs,
-        //         &other_data,
-        //         &extra_data,
-        //         &mut curr_block_tries,
-        //         self.withdrawals,
-        //         dummies_added,
-        //     )?;
+        //     .fold(0, |acc, info| acc + info.meta.gas_used);
+        // let txns = self
+        //     .txn_info
+        //     .clone()
+        //     .into_iter()
+        //     .filter_map(|info| info.meta.txn_bytes)
+        //     .collect::<Vec<_>>();
+        // let mut contract_code = HashMap::default();
+        // for txn in self.txn_info {
+        //     for (&contract_h, code) in &txn.contract_code_accessed {
+        //         contract_code.insert(contract_h, code.clone());
+        //     }
         // }
+
+        // let trie_roots_after = other_data.b_data.final_tries;
+        // let txn_gen_inputs = vec![GenerationInputs {
+        //     txn_number_before: extra_data.txn_number_before,
+        //     gas_used_before: extra_data.gas_used_before,
+        //     gas_used_after: final_gas_used.into(),
+        //     signed_txns: txns,
+        //     withdrawals: self.withdrawals, /* Only ever set in a dummy txn at the end
+        // of
+        //                                     * the block (see
+        //                                       `[add_withdrawals_to_txns]`
+        //                                     * for more info). */
+        //     tries: initial_block_tries,
+        //     trie_roots_after: TrieRoots {
+        //         state_root: other_data.b_data.final_tries.state_root,
+        //         receipts_root: other_data.b_data.final_tries.receipts_root,
+        //         transactions_root: other_data.b_data.final_tries.txn_root,
+        //     },
+        //     checkpoint_state_trie_root: extra_data.checkpoint_state_trie_root,
+        //     contract_code,
+        //     block_metadata: other_data.b_data.b_meta.clone(),
+        //     block_hashes: other_data.b_data.b_hashes.clone(),
+        // }];
+
+        let mut txn_gen_inputs = self
+            .txn_info
+            .into_iter()
+            .enumerate()
+            .map(|(txn_idx, txn_info)| {
+                trace!("Generating proof IR for txn {}...", txn_idx);
+
+                Self::init_any_needed_empty_storage_tries(
+                    &mut curr_block_tries.storage,
+                    txn_info
+                        .nodes_used_by_txn
+                        .storage_accesses
+                        .iter()
+                        .map(|(k, _)| k),
+                    &txn_info
+                        .nodes_used_by_txn
+                        .state_accounts_with_no_accesses_but_storage_tries,
+                );
+                // For each non-dummy txn, we increment `txn_number_after` by 1, and
+                // update `gas_used_after` accordingly.
+                extra_data.txn_number_after += U256::one();
+                extra_data.gas_used_after += txn_info.meta.gas_used.into();
+
+                // Because we need to run delta application before creating the minimal
+                // sub-tries (we need to detect if deletes collapsed any branches), we need to
+                // do this clone every iteration.
+                let tries_at_start_of_txn = curr_block_tries.clone();
+
+                Self::update_txn_and_receipt_tries(&mut curr_block_tries, &txn_info.meta, txn_idx);
+
+                let delta_out = Self::apply_deltas_to_trie_state(
+                    &mut curr_block_tries,
+                    &txn_info.nodes_used_by_txn,
+                    &txn_info.meta,
+                )?;
+
+                let tries = Self::create_minimal_partial_tries_needed_by_txn(
+                    &tries_at_start_of_txn,
+                    &txn_info.nodes_used_by_txn,
+                    txn_idx,
+                    delta_out,
+                    &other_data.b_data.b_meta.block_beneficiary,
+                )?;
+
+                let trie_roots_after = calculate_trie_input_hashes(&curr_block_tries);
+                let gen_inputs = GenerationInputs {
+                    txn_number_before: extra_data.txn_number_before,
+                    gas_used_before: extra_data.gas_used_before,
+                    gas_used_after: extra_data.gas_used_after,
+                    signed_txns: if let Some(txn) = txn_info.meta.txn_bytes {
+                        vec![txn]
+                    } else {
+                        vec![]
+                    },
+                    withdrawals: Vec::default(), /* Only ever set in a dummy txn at the end of
+                                                  * the block (see `[add_withdrawals_to_txns]`
+                                                  * for more info). */
+                    tries,
+                    trie_roots_after,
+                    checkpoint_state_trie_root: extra_data.checkpoint_state_trie_root,
+                    contract_code: txn_info.contract_code_accessed,
+                    block_metadata: other_data.b_data.b_meta.clone(),
+                    block_hashes: other_data.b_data.b_hashes.clone(),
+                };
+
+                // After processing a transaction, we update the remaining accumulators
+                // for the next transaction.
+                extra_data.txn_number_before += U256::one();
+                extra_data.gas_used_before = extra_data.gas_used_after;
+
+                Ok(gen_inputs)
+            })
+            .collect::<TraceParsingResult<Vec<_>>>()?;
+
+        txn_gen_inputs[0].tries = initial_block_tries;
+        let dummies_added = Self::pad_gen_inputs_with_dummy_inputs_if_needed(
+            &mut txn_gen_inputs,
+            &other_data,
+            &extra_data,
+            &extra_data_for_dummies,
+            &initial_tries_for_dummies,
+            &curr_block_tries,
+            !self.withdrawals.is_empty(),
+        );
+
+        if !self.withdrawals.is_empty() {
+            Self::add_withdrawals_to_txns(
+                &mut txn_gen_inputs,
+                &other_data,
+                &extra_data,
+                &mut curr_block_tries,
+                self.withdrawals,
+                dummies_added,
+            )?;
+        }
 
         Ok(txn_gen_inputs)
     }

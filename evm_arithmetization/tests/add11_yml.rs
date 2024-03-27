@@ -13,6 +13,7 @@ use evm_arithmetization::prover::testing::simulate_all_segments_interpreter;
 use evm_arithmetization::verifier::verify_proof;
 use evm_arithmetization::{AllRecursiveCircuits, AllStark, GenerationInputs, Node};
 use hex_literal::hex;
+use itertools::Itertools;
 use keccak_hash::keccak;
 use mpt_trie::nibbles::Nibbles;
 use mpt_trie::partial_trie::{HashedPartialTrie, PartialTrie};
@@ -222,9 +223,67 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
     let mut timing = TimingTree::new("prove", log::Level::Debug);
     let max_cpu_len_log = 32;
 
-    let bytes = std::fs::read("block-eth-19240752.json").unwrap();
+    let bytes = std::fs::read("block-eth-19240753-wth.json").unwrap();
+    // let other_bytes = std::fs::read("block-eth-19240753-second2.json").unwrap();
     let inputs: Vec<GenerationInputs> = serde_json::from_slice(&bytes).unwrap();
-    let inputs = inputs[0].clone();
+    let inputs = inputs;
+    // let other_inputs: Vec<GenerationInputs> =
+    // serde_json::from_slice(&other_bytes).unwrap(); let other_inputs =
+    // other_inputs[0..1].to_vec();
+
+    let mut contract_code = HashMap::default();
+    for elt in &inputs {
+        for (h, contract) in &elt.contract_code {
+            contract_code.insert(*h, contract.clone());
+        }
+    }
+    let inputs = GenerationInputs {
+        txn_number_before: inputs[0].txn_number_before.clone(),
+        gas_used_before: inputs[0].gas_used_before,
+        signed_txns: inputs
+            .iter()
+            .filter_map(|inp| {
+                if !inp.signed_txns.is_empty() {
+                    Some(inp.signed_txns[0].clone())
+                } else {
+                    None
+                }
+            })
+            .collect_vec(),
+        withdrawals: inputs.last().unwrap().withdrawals.clone(),
+        tries: inputs[0].tries.clone(),
+        checkpoint_state_trie_root: inputs[0].checkpoint_state_trie_root,
+        block_hashes: inputs[0].block_hashes.clone(),
+        block_metadata: inputs[0].block_metadata.clone(),
+        contract_code,
+        ..inputs.last().unwrap().clone()
+    };
+    // let inputs = GenerationInputs {
+    //     txn_number_before: other_inputs[0].txn_number_before.clone(),
+    //     gas_used_before: other_inputs[0].gas_used_before,
+    //     signed_txns: other_inputs
+    //         .iter()
+    //         .filter_map(|inp| {
+    //             if !inp.signed_txns.is_empty() {
+    //                 Some(inp.signed_txns[0].clone())
+    //             } else {
+    //                 None
+    //             }
+    //         })
+    //         .collect_vec(),
+    //     withdrawals: vec![],
+    //     tries: inputs.tries.clone(),
+    //     checkpoint_state_trie_root: other_inputs[0].checkpoint_state_trie_root,
+    //     block_hashes: other_inputs[0].block_hashes.clone(),
+    //     block_metadata: other_inputs[0].block_metadata.clone(),
+    //     contract_code,
+    //     ..other_inputs.last().unwrap().clone()
+    // };
+
+    // println!(
+    //     "inputs gas {:?}, block data {:?}",
+    //     inputs.gas_used_after, inputs.block_metadata
+    // );
 
     let now = Instant::now();
     simulate_all_segments_interpreter::<F>(inputs, max_cpu_len_log)?;

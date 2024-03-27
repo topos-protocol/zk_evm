@@ -1042,6 +1042,17 @@ impl<F: Field> State<F> for Interpreter<F> {
 
         self.fill_stack_fields(&mut row)?;
 
+        let pc = self.get_registers().program_counter;
+        if self.get_clock() > 18158186 {
+            println!(
+                "Cycle {}, ctx={}, pc={}, instruction={:?}, stack={:?}",
+                self.get_clock(),
+                self.get_context(),
+                KERNEL.offset_name(pc),
+                op,
+                self.get_generation_state().stack(),
+            );
+        }
         if registers.is_kernel {
             log_kernel_instruction(self, op);
         } else {

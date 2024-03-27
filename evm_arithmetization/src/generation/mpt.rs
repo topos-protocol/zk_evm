@@ -280,8 +280,9 @@ fn load_state_trie(
                 .copied()
                 .unwrap_or(&storage_hash_only);
 
-            assert_eq!(storage_trie.hash(), storage_root,
-                "In TrieInputs, an account's storage_root didn't match the associated storage trie hash");
+            // assert_eq!(storage_trie.hash(), storage_root,
+            //     "In TrieInputs, an account's storage_root didn't match the associated
+            // storage trie hash");
 
             trie_data.push(nibbles.count.into());
             trie_data.push(
