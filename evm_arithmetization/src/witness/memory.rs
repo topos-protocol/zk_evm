@@ -1,6 +1,11 @@
+use core::fmt;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use ethereum_types::U256;
+use serde::de::{Error, SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::cpu::membus::{NUM_CHANNELS, NUM_GP_CHANNELS};
 
@@ -162,7 +167,7 @@ impl MemoryOp {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MemoryState {
     pub(crate) contexts: Vec<MemoryContextState>,
     preinitialized_segments: HashMap<Segment, MemorySegmentState>,
@@ -302,8 +307,9 @@ impl Default for MemoryState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct MemoryContextState {
+    #[serde(with = "self")]
     /// The content of each memory segment.
     pub(crate) segments: [MemorySegmentState; Segment::COUNT],
 }
@@ -316,7 +322,54 @@ impl Default for MemoryContextState {
     }
 }
 
-#[derive(Clone, Default, Debug)]
+impl Serialize for MemoryContextState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(self.segments.len()))?;
+        for e in &self.segments {
+            seq.serialize_element(&e)?;
+        }
+        seq.end()
+    }
+}
+
+fn deserialize<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<[MemorySegmentState; Segment::COUNT], D::Error> {
+    struct ArrayVisitor {
+        element: PhantomData<MemorySegmentState>,
+    }
+
+    impl<'de> Visitor<'de> for ArrayVisitor {
+        type Value = [MemorySegmentState; Segment::COUNT];
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str(format!("an array of length {:?}", Segment::COUNT).as_str())
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<[MemorySegmentState; Segment::COUNT], A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut arr = std::array::from_fn(|_| MemorySegmentState::default());
+            for i in 0..Segment::COUNT {
+                arr[i] = seq
+                    .next_element()?
+                    .ok_or_else(|| Error::invalid_length(i, &self))?;
+            }
+            Ok(arr)
+        }
+    }
+
+    let visitor = ArrayVisitor {
+        element: PhantomData,
+    };
+    deserializer.deserialize_tuple(Segment::COUNT, visitor)
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub(crate) struct MemorySegmentState {
     pub(crate) content: Vec<Option<U256>>,
 }

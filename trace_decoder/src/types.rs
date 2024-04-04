@@ -2,6 +2,7 @@ use ethereum_types::{Address, H256, U256};
 use evm_arithmetization::{
     generation::GenerationInputs,
     proof::{BlockHashes, BlockMetadata},
+    prover::GenerationSegmentData,
 };
 use mpt_trie::{nibbles::Nibbles, partial_trie::HashedPartialTrie};
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,8 @@ pub(crate) const ZERO_STORAGE_SLOT_VAL_RLPED: [u8; 1] = [128];
 /// An `IR` (Intermediate Representation) for a given txn in a block that we can
 /// use to generate a proof for that txn.
 pub type TxnProofGenIR = GenerationInputs;
+/// All inputs necessary for a proof.
+pub type AllData = (GenerationInputs, usize, GenerationSegmentData);
 
 /// Other data that is needed for proof gen.
 #[derive(Clone, Debug, Deserialize, Serialize)]
