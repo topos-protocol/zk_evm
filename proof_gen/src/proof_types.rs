@@ -51,6 +51,15 @@ pub enum AggregatableProof {
     Agg(GeneratedAggProof),
 }
 
+/// Abstract away
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum AggregatableTxnProof {
+    /// The underlying proof is a transaction proof.
+    Agg(Option<GeneratedAggProof>),
+    /// The underlying proof is an aggregation proof.
+    Txn(GeneratedAggProof),
+}
+
 impl AggregatableProof {
     pub(crate) fn public_values(&self) -> PublicValues {
         match self {

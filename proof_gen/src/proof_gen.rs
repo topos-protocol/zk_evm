@@ -96,7 +96,7 @@ pub fn generate_agg_proof(
 /// Note that the child proofs may be either transaction or aggregation proofs.
 pub fn generate_transaction_agg_proof(
     p_state: &ProverState,
-    prev_opt_parent_b_proof: Option<&GeneratedBlockProof>,
+    prev_opt_parent_b_proof: Option<&GeneratedAggProof>,
     curr_block_agg_proof: &GeneratedAggProof,
 ) -> ProofGenResult<GeneratedAggProof> {
     let parent_intern = prev_opt_parent_b_proof.map(|p| &p.intern);
