@@ -643,7 +643,10 @@ pub mod testing {
 
     /// Simulates the zkEVM CPU execution.
     /// It does not generate any trace or proof of correct state transition.
-    pub fn simulate_execution<F: RichField>(inputs: GenerationInputs) -> Result<()> {
+    pub fn simulate_execution<F: RichField>(
+        inputs: GenerationInputs,
+        max_cpu_len: Option<usize>,
+    ) -> Result<()> {
         let initial_stack = vec![];
         let initial_offset = KERNEL.global_labels["init"];
         let mut interpreter: Interpreter<F> =
