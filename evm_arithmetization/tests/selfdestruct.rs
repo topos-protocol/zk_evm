@@ -137,7 +137,7 @@ fn test_selfdestruct() -> anyhow::Result<()> {
         },
     };
 
-    let mut data = generate_all_data_segments::<F>(None, inputs.clone())?;
+    let (mut data, _) = generate_all_data_segments::<F>(None, None, inputs.clone(), None)?;
 
     let max_cpu_len_log = 20;
     let mut timing = TimingTree::new("prove", log::Level::Debug);
