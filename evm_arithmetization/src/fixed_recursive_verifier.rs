@@ -1031,7 +1031,7 @@ where
         RegistersDataTarget::connect(
             &mut builder,
             public_values.registers_before.clone(),
-            rhs_pv.registers_before.clone(),
+            lhs_pv.registers_before.clone(),
         );
 
         // Check the initial and final register values.
