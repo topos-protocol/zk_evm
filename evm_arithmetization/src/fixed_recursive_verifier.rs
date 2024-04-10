@@ -1807,7 +1807,7 @@ where
 
         txn_inputs.set_verifier_data_target(
             &self.txn_aggregation.cyclic_vk,
-            &self.segment_aggregation.circuit.verifier_only,
+            &self.txn_aggregation.circuit.verifier_only,
         );
 
         let txn_public_values = PublicValues {
