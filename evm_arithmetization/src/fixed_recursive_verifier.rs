@@ -1848,12 +1848,64 @@ where
         let mut txn_inputs = PartialWitness::new();
 
         txn_inputs.set_bool_target(self.txn_aggregation.lhs.is_agg, lhs_is_agg);
-        txn_inputs.set_proof_with_pis_target(&self.txn_aggregation.lhs.txn_agg_proof, lhs_proof);
+        if lhs_is_agg {
+            txn_inputs
+                .set_proof_with_pis_target(&self.txn_aggregation.lhs.txn_agg_proof, lhs_proof);
+        } else {
+            let ProofWithPublicInputs {
+                proof,
+                public_inputs,
+            } = lhs_proof;
+            let ProofWithPublicInputsTarget {
+                proof: proof_targets,
+                public_inputs: pi_targets,
+            } = &self.txn_aggregation.lhs.txn_agg_proof;
+            txn_inputs.set_proof_target(proof_targets, proof);
+            let num_pis = self.txn_aggregation.circuit.common.num_public_inputs;
+            let mut dummy_pis = vec![F::ZERO; num_pis];
+            let cyclic_verifying_data = &self.txn_aggregation.circuit.verifier_only;
+            let mut cyclic_vk = cyclic_verifying_data.circuit_digest.to_vec();
+            cyclic_vk.append(&mut cyclic_verifying_data.constants_sigmas_cap.flatten());
+            let cyclic_vk_len = cyclic_vk.len();
+            for i in 0..cyclic_vk_len {
+                dummy_pis[num_pis - cyclic_vk_len + i] = cyclic_vk[i];
+            }
+            // Set dummy public inputs.
+            for (&pi_t, pi) in pi_targets.iter().zip_eq(dummy_pis) {
+                txn_inputs.set_target(pi_t, pi);
+            }
+        }
         txn_inputs
             .set_proof_with_pis_target(&self.txn_aggregation.lhs.segment_agg_proof, lhs_proof);
 
         txn_inputs.set_bool_target(self.txn_aggregation.rhs.is_agg, rhs_is_agg);
-        txn_inputs.set_proof_with_pis_target(&self.txn_aggregation.rhs.txn_agg_proof, rhs_proof);
+        if rhs_is_agg {
+            txn_inputs
+                .set_proof_with_pis_target(&self.txn_aggregation.rhs.txn_agg_proof, rhs_proof);
+        } else {
+            let ProofWithPublicInputs {
+                proof,
+                public_inputs,
+            } = rhs_proof;
+            let ProofWithPublicInputsTarget {
+                proof: proof_targets,
+                public_inputs: pi_targets,
+            } = &self.txn_aggregation.rhs.txn_agg_proof;
+            txn_inputs.set_proof_target(proof_targets, proof);
+            let num_pis = self.txn_aggregation.circuit.common.num_public_inputs;
+            let mut dummy_pis = vec![F::ZERO; num_pis];
+            let cyclic_verifying_data = &self.txn_aggregation.circuit.verifier_only;
+            let mut cyclic_vk = cyclic_verifying_data.circuit_digest.to_vec();
+            cyclic_vk.append(&mut cyclic_verifying_data.constants_sigmas_cap.flatten());
+            let cyclic_vk_len = cyclic_vk.len();
+            for i in 0..cyclic_vk_len {
+                dummy_pis[num_pis - cyclic_vk_len + i] = cyclic_vk[i];
+            }
+            // Set dummy public inputs.
+            for (&pi_t, pi) in pi_targets.iter().zip_eq(dummy_pis) {
+                txn_inputs.set_target(pi_t, pi);
+            }
+        }
         txn_inputs
             .set_proof_with_pis_target(&self.txn_aggregation.rhs.segment_agg_proof, rhs_proof);
 
