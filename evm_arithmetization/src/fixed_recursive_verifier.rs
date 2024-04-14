@@ -1732,7 +1732,33 @@ where
             .set_proof_with_pis_target(&self.segment_aggregation.lhs.segment_proof, lhs_proof);
 
         agg_inputs.set_bool_target(self.segment_aggregation.rhs.is_agg, rhs_is_agg);
-        agg_inputs.set_proof_with_pis_target(&self.segment_aggregation.rhs.agg_proof, rhs_proof);
+        if rhs_is_agg {
+            agg_inputs
+                .set_proof_with_pis_target(&self.segment_aggregation.rhs.agg_proof, rhs_proof);
+        } else {
+            let ProofWithPublicInputs {
+                proof,
+                public_inputs,
+            } = rhs_proof;
+            let ProofWithPublicInputsTarget {
+                proof: proof_targets,
+                public_inputs: pi_targets,
+            } = &self.segment_aggregation.rhs.agg_proof;
+            agg_inputs.set_proof_target(proof_targets, proof);
+            let num_pis = self.segment_aggregation.circuit.common.num_public_inputs;
+            let mut dummy_pis = vec![F::ZERO; num_pis];
+            let cyclic_verifying_data = &self.segment_aggregation.circuit.verifier_only;
+            let mut cyclic_vk = cyclic_verifying_data.circuit_digest.to_vec();
+            cyclic_vk.append(&mut cyclic_verifying_data.constants_sigmas_cap.flatten());
+            let cyclic_vk_len = cyclic_vk.len();
+            for i in 0..cyclic_vk_len {
+                dummy_pis[num_pis - cyclic_vk_len + i] = cyclic_vk[i];
+            }
+            // Set dummy public inputs.
+            for (&pi_t, pi) in pi_targets.iter().zip_eq(dummy_pis) {
+                agg_inputs.set_target(pi_t, pi);
+            }
+        }
         agg_inputs
             .set_proof_with_pis_target(&self.segment_aggregation.rhs.segment_proof, rhs_proof);
 
