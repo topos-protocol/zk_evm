@@ -1512,10 +1512,8 @@ where
             check_abort_signal(abort_signal.clone())?;
         }
 
-        root_inputs.set_verifier_data_target(
-            &self.root.cyclic_vk,
-            &self.segment_aggregation.circuit.verifier_only,
-        );
+        root_inputs
+            .set_verifier_data_target(&self.root.cyclic_vk, &self.root.circuit.verifier_only);
 
         set_public_value_targets(
             &mut root_inputs,
