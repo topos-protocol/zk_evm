@@ -233,7 +233,6 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
 
     assert_eq!(all_segment_proofs.len(), 3);
 
-    println!("First aggreg...");
     let (first_aggreg_proof, first_aggreg_pv) = all_circuits.prove_segment_aggregation(
         false,
         &all_segment_proofs[0].proof_with_pis,
@@ -244,7 +243,6 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
     )?;
     all_circuits.verify_segment_aggregation(&first_aggreg_proof)?;
 
-    println!("Second aggreg...");
     let (second_aggreg_proof, second_aggreg_pv) = all_circuits.prove_segment_aggregation(
         true,
         &first_aggreg_proof,
@@ -255,6 +253,8 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
     )?;
     all_circuits.verify_segment_aggregation(&second_aggreg_proof)?;
 
+    // We need two transactions to carry out a transaction aggregation. So we create
+    // a dummy segment aggregation.
     let trie_roots_before = TrieRoots {
         state_root: inputs.tries.state_trie.hash(),
         transactions_root: inputs.tries.transactions_trie.hash(),
@@ -288,7 +288,6 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
 
     assert_eq!(dummy_segs.len(), 2);
 
-    println!("Dummy aggreg...");
     let dummy_aggreg = all_circuits.prove_segment_aggregation(
         false,
         &dummy_segs[0].proof_with_pis,
@@ -298,7 +297,6 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
         dummy_segs[1].public_values.clone(),
     )?;
 
-    println!("Transaction aggreg...");
     let (txn_aggreg_proof, _) = all_circuits.prove_transaction_aggregation(
         false,
         &dummy_aggreg.0,
