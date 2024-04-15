@@ -690,19 +690,15 @@ where
         let inner_common_data: [_; NUM_TABLES] =
             core::array::from_fn(|i| &by_table[i].final_circuits()[0].common);
 
-        let cap_length_before = 1
+        let cap_length = 1
             << inner_common_data[*Table::MemBefore]
                 .fri_params
                 .config
                 .cap_height;
-        let cap_length_after = 1
-            << inner_common_data[*Table::MemAfter]
-                .fri_params
-                .config
-                .cap_height;
+
         let mut builder = CircuitBuilder::new(CircuitConfig::standard_recursion_config());
 
-        let public_values = add_virtual_public_values(&mut builder, cap_length_before);
+        let public_values = add_virtual_public_values(&mut builder, cap_length);
 
         let recursive_proofs =
             core::array::from_fn(|i| builder.add_virtual_proof_with_pis(inner_common_data[i]));
@@ -810,11 +806,11 @@ where
 
         let merkle_before = MemCapTarget::from_public_inputs(
             &recursive_proofs[*Table::MemBefore].public_inputs,
-            cap_length_before,
+            cap_length,
         );
         let merkle_after = MemCapTarget::from_public_inputs(
             &recursive_proofs[*Table::MemAfter].public_inputs,
-            cap_length_after,
+            cap_length,
         );
         // Connect Memory before and after the execution with
         // the public values.
@@ -907,7 +903,7 @@ where
         ExtraBlockDataTarget::connect(
             &mut builder,
             public_values.extra_block_data,
-            lhs_pv.extra_block_data,
+            rhs_pv.extra_block_data,
         );
         ExtraBlockDataTarget::connect(
             &mut builder,
@@ -1155,8 +1151,8 @@ where
         };
 
         let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_config());
-        let len_before = agg.public_values.mem_before.mem_cap.0.len();
-        let public_values = add_virtual_public_values(&mut builder, len_before);
+        let mem_cap_len = agg.public_values.mem_before.mem_cap.0.len();
+        let public_values = add_virtual_public_values(&mut builder, mem_cap_len);
         let has_parent_block = builder.add_virtual_bool_target_safe();
         let parent_block_proof = builder.add_virtual_proof_with_pis(&expected_common_data);
         let agg_root_proof = builder.add_virtual_proof_with_pis(&agg.circuit.common);
@@ -1165,9 +1161,9 @@ where
         Self::connect_block_hashes(&mut builder, &parent_block_proof, &agg_root_proof);
 
         let parent_pv =
-            PublicValuesTarget::from_public_inputs(&parent_block_proof.public_inputs, len_before);
+            PublicValuesTarget::from_public_inputs(&parent_block_proof.public_inputs, mem_cap_len);
         let agg_pv =
-            PublicValuesTarget::from_public_inputs(&agg_root_proof.public_inputs, len_before);
+            PublicValuesTarget::from_public_inputs(&agg_root_proof.public_inputs, mem_cap_len);
 
         // Connect block `trie_roots_before` with parent_pv `trie_roots_before`.
         TrieRootsTarget::connect(
@@ -1701,32 +1697,18 @@ where
         let mut agg_inputs = PartialWitness::new();
 
         agg_inputs.set_bool_target(self.segment_aggregation.lhs.is_agg, lhs_is_agg);
+        // If the lhs is not an aggregation, we set the cyclic vk to a dummy value, so
+        // that it corresponds to the aggregation cyclic vk.
         if lhs_is_agg {
             agg_inputs
                 .set_proof_with_pis_target(&self.segment_aggregation.lhs.agg_proof, lhs_proof);
         } else {
-            let ProofWithPublicInputs {
-                proof,
-                public_inputs,
-            } = lhs_proof;
-            let ProofWithPublicInputsTarget {
-                proof: proof_targets,
-                public_inputs: pi_targets,
-            } = &self.segment_aggregation.lhs.agg_proof;
-            agg_inputs.set_proof_target(proof_targets, proof);
-            let num_pis = self.segment_aggregation.circuit.common.num_public_inputs;
-            let mut dummy_pis = vec![F::ZERO; num_pis];
-            let cyclic_verifying_data = &self.segment_aggregation.circuit.verifier_only;
-            let mut cyclic_vk = cyclic_verifying_data.circuit_digest.to_vec();
-            cyclic_vk.append(&mut cyclic_verifying_data.constants_sigmas_cap.flatten());
-            let cyclic_vk_len = cyclic_vk.len();
-            for i in 0..cyclic_vk_len {
-                dummy_pis[num_pis - cyclic_vk_len + i] = cyclic_vk[i];
-            }
-            // Set dummy public inputs.
-            for (&pi_t, pi) in pi_targets.iter().zip_eq(dummy_pis) {
-                agg_inputs.set_target(pi_t, pi);
-            }
+            Self::set_dummy_proof_with_cyclic_vk_pis(
+                &self.segment_aggregation.circuit,
+                &mut agg_inputs,
+                &self.segment_aggregation.lhs.agg_proof,
+                lhs_proof,
+            )
         }
         agg_inputs
             .set_proof_with_pis_target(&self.segment_aggregation.lhs.segment_proof, lhs_proof);
@@ -1736,28 +1718,12 @@ where
             agg_inputs
                 .set_proof_with_pis_target(&self.segment_aggregation.rhs.agg_proof, rhs_proof);
         } else {
-            let ProofWithPublicInputs {
-                proof,
-                public_inputs,
-            } = rhs_proof;
-            let ProofWithPublicInputsTarget {
-                proof: proof_targets,
-                public_inputs: pi_targets,
-            } = &self.segment_aggregation.rhs.agg_proof;
-            agg_inputs.set_proof_target(proof_targets, proof);
-            let num_pis = self.segment_aggregation.circuit.common.num_public_inputs;
-            let mut dummy_pis = vec![F::ZERO; num_pis];
-            let cyclic_verifying_data = &self.segment_aggregation.circuit.verifier_only;
-            let mut cyclic_vk = cyclic_verifying_data.circuit_digest.to_vec();
-            cyclic_vk.append(&mut cyclic_verifying_data.constants_sigmas_cap.flatten());
-            let cyclic_vk_len = cyclic_vk.len();
-            for i in 0..cyclic_vk_len {
-                dummy_pis[num_pis - cyclic_vk_len + i] = cyclic_vk[i];
-            }
-            // Set dummy public inputs.
-            for (&pi_t, pi) in pi_targets.iter().zip_eq(dummy_pis) {
-                agg_inputs.set_target(pi_t, pi);
-            }
+            Self::set_dummy_proof_with_cyclic_vk_pis(
+                &self.segment_aggregation.circuit,
+                &mut agg_inputs,
+                &self.segment_aggregation.rhs.agg_proof,
+                rhs_proof,
+            )
         }
         agg_inputs
             .set_proof_with_pis_target(&self.segment_aggregation.rhs.segment_proof, rhs_proof);
@@ -1855,7 +1821,8 @@ where
             txn_inputs
                 .set_proof_with_pis_target(&self.txn_aggregation.lhs.txn_agg_proof, lhs_proof);
         } else {
-            self.set_dummy_proof_with_cyclic_vk_pis(
+            Self::set_dummy_proof_with_cyclic_vk_pis(
+                &self.txn_aggregation.circuit,
                 &mut txn_inputs,
                 &self.txn_aggregation.lhs.txn_agg_proof,
                 lhs_proof,
@@ -1871,7 +1838,8 @@ where
             txn_inputs
                 .set_proof_with_pis_target(&self.txn_aggregation.rhs.txn_agg_proof, rhs_proof);
         } else {
-            self.set_dummy_proof_with_cyclic_vk_pis(
+            Self::set_dummy_proof_with_cyclic_vk_pis(
+                &self.txn_aggregation.circuit,
                 &mut txn_inputs,
                 &self.txn_aggregation.rhs.txn_agg_proof,
                 rhs_proof,
@@ -1926,9 +1894,9 @@ where
     /// of the child share the same vk. This is possible because only the
     /// aggregation inner circuit is checked against its vk.
     fn set_dummy_proof_with_cyclic_vk_pis(
-        &self,
+        circuit_agg: &CircuitData<F, C, D>,
         witness: &mut PartialWitness<F>,
-        txn_agg_proof: &ProofWithPublicInputsTarget<D>,
+        agg_proof: &ProofWithPublicInputsTarget<D>,
         proof: &ProofWithPublicInputs<F, C, D>,
     ) {
         let ProofWithPublicInputs {
@@ -1938,14 +1906,14 @@ where
         let ProofWithPublicInputsTarget {
             proof: proof_targets,
             public_inputs: pi_targets,
-        } = txn_agg_proof;
+        } = agg_proof;
 
         // The proof remains the same.
         witness.set_proof_target(proof_targets, proof);
 
-        let num_pis = self.txn_aggregation.circuit.common.num_public_inputs;
+        let num_pis = circuit_agg.common.num_public_inputs;
         let mut dummy_pis = vec![F::ZERO; num_pis];
-        let cyclic_verifying_data = &self.txn_aggregation.circuit.verifier_only;
+        let cyclic_verifying_data = &circuit_agg.verifier_only;
         let mut cyclic_vk = cyclic_verifying_data.circuit_digest.to_vec();
         cyclic_vk.append(&mut cyclic_verifying_data.constants_sigmas_cap.flatten());
 
