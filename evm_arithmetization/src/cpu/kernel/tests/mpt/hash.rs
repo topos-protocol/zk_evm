@@ -134,7 +134,8 @@ fn test_state_trie(trie_inputs: TrieInputs) -> Result<()> {
         interpreter.stack()
     );
     let hash = H256::from_uint(&interpreter.stack()[1]);
-    let expected_state_trie_hash = trie_inputs.state_trie.hash();
+    let expected_state_trie_hash = trie_inputs.transactions_trie.hash();
+    println!("{:?} --- {:?}", hash, trie_inputs.state_trie);
     assert_eq!(hash, expected_state_trie_hash);
 
     Ok(())

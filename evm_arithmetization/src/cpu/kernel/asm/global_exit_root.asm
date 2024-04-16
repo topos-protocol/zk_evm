@@ -48,7 +48,7 @@ write_timestamp_to_storage:
     %slot_to_storage_key
     // stack: storage_key, value_ptr, after_timestamp_storage_insert
     PUSH 64 // storage_key has 64 nibbles
-    %get_storage_trie(@ADDRESS_GLOBAL_EXIT_ROOT_MANAGER_L2)
+    %get_storage_trie_from_key(@ADDRESS_GLOBAL_EXIT_ROOT_MANAGER_L2)
     // stack: storage_root_ptr, 64, storage_key, value_ptr, after_timestamp_storage_insert
     %stack (storage_root_ptr, num_nibbles, storage_key) -> (storage_root_ptr, num_nibbles, storage_key, after_read, storage_root_ptr, num_nibbles, storage_key)
     %jump(mpt_read)

@@ -37,17 +37,29 @@ global hash_initial_tries:
     // We initialize the segment length with 1 because the segment contains 
     // the null pointer `0` when the tries are empty.
     PUSH 1
-    %mpt_hash_state_trie  %mload_global_metadata(@GLOBAL_METADATA_STATE_TRIE_DIGEST_BEFORE)    %assert_eq
+    %mpt_hash_state_trie  %mload_global_metadata(@GLOBAL_METADATA_STATE_TRIE_DIGEST_BEFORE)    
+global debug_state:
+        %assert_eq
+
     // stack: trie_data_len
-    %mpt_hash_txn_trie     %mload_global_metadata(@GLOBAL_METADATA_TXN_TRIE_DIGEST_BEFORE)      %assert_eq
+    // %mpt_hash_txn_trie  %mload_global_metadata(@GLOBAL_METADATA_TXN_TRIE_DIGEST_BEFORE)    
+global debug_txn:
+    // %assert_eq
+global debug_txn_ok:
     // stack: trie_data_len
-    %mpt_hash_receipt_trie %mload_global_metadata(@GLOBAL_METADATA_RECEIPT_TRIE_DIGEST_BEFORE)  %assert_eq
+    // %mpt_hash_receipt_trie %mload_global_metadata(@GLOBAL_METADATA_RECEIPT_TRIE_DIGEST_BEFORE)
+global debug_receipt:
+    // %assert_eq
     // stack: trie_data_full_len
     %mstore_global_metadata(@GLOBAL_METADATA_TRIE_DATA_SIZE)
+global debug_todos:
 
     // If txn_idx == 0, update the beacon_root and exit roots.
     %mload_global_metadata(@GLOBAL_METADATA_TXN_NUMBER_BEFORE)
     ISZERO
+
+    PUSH start_txn
+    SWAP1
     %jumpi(set_beacon_root)
 
 global start_txn:

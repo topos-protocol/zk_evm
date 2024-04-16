@@ -37,7 +37,7 @@ write_beacon_roots_to_storage:
     %slot_to_storage_key
     // stack: storage_key, value_ptr, after_beacon_roots_storage_insert, retdest
     PUSH 64 // storage_key has 64 nibbles
-    %get_storage_trie(@BEACON_ROOTS_ADDRESS)
+    %get_storage_trie_from_key(@BEACON_ROOTS_ADDRESS)
     // stack: storage_root_ptr, 64, storage_key, value_ptr, after_beacon_roots_storage_insert, retdest
     %jump(mpt_insert)
 
@@ -60,7 +60,7 @@ delete_root_idx_slot:
     %slot_to_storage_key
     // stack: storage_key, after_root_idx_slot_delete, write_beacon_roots_to_storage, timestamp_idx, timestamp, retdest
     PUSH 64 // storage_key has 64 nibbles
-    %get_storage_trie(@BEACON_ROOTS_ADDRESS)
+    %get_storage_trie_from_key(@BEACON_ROOTS_ADDRESS)
     // stack: storage_root_ptr, 64, storage_key, after_root_idx_slot_delete, write_beacon_roots_to_storage, timestamp_idx, timestamp, retdest
 
     // If the slot is empty (i.e. ptr defaulting to 0), skip the deletion.

@@ -220,12 +220,13 @@ fn apply_metadata_and_tries_memops<F: RichField + Extendable<D>, const D: usize>
 
 pub(crate) fn debug_inputs(inputs: &GenerationInputs) {
     log::debug!("Input signed_txn: {:?}", &inputs.signed_txn);
-    log::debug!("Input state_trie: {:?}", &inputs.tries.state_trie);
+    log::debug!("Input state_trie: {:#?}", &inputs.tries.state_trie);
     log::debug!(
-        "Input transactions_trie: {:?}",
-        &inputs.tries.transactions_trie
+        "Input transactions_trie: {:#?} and hash = {:?}",
+        &inputs.tries.transactions_trie,
+        inputs.tries.transactions_trie.hash()
     );
-    log::debug!("Input receipts_trie: {:?}", &inputs.tries.receipts_trie);
+    log::debug!("Input receipts_trie: {:#?}", &inputs.tries.receipts_trie);
     log::debug!("Input storage_tries: {:?}", &inputs.tries.storage_tries);
     log::debug!("Input contract_code: {:?}", &inputs.contract_code);
 }
