@@ -58,8 +58,6 @@ global debug_todos:
     %mload_global_metadata(@GLOBAL_METADATA_TXN_NUMBER_BEFORE)
     ISZERO
 
-    PUSH start_txn
-    SWAP1
     %jumpi(set_beacon_root)
 
 global start_txn:
