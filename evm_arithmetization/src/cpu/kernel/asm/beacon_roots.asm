@@ -43,7 +43,7 @@ write_beacon_roots_to_storage:
 
 after_beacon_roots_storage_insert:
     // stack: new_storage_root_ptr, retdest
-    %get_account_data(@BEACON_ROOTS_ADDRESS)
+    %get_account_data_from_key(@BEACON_ROOTS_ADDRESS)
     // stack: account_ptr, new_storage_root_ptr, retdest
 
     // Update the copied account with our new storage root pointer.
@@ -79,7 +79,7 @@ checkpoint_delete_root_idx:
 
 after_root_idx_slot_delete:
     // stack: new_storage_root_ptr, write_beacon_roots_to_storage, timestamp_idx, timestamp, retdest
-    %get_account_data(@BEACON_ROOTS_ADDRESS)
+    %get_account_data_from_key(@BEACON_ROOTS_ADDRESS)
     // stack: account_ptr, new_storage_root_ptr, write_beacon_roots_to_storage, timestamp_idx, timestamp, retdest
 
     // Update the copied account with our new storage root pointer.
