@@ -1,4 +1,5 @@
 global init:
+    %shift_table_init
     PUSH @SEGMENT_REGISTERS_STATES
     // stack: addr_registers
     // First, set the registers correctly and verify their values.

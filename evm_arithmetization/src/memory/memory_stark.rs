@@ -1,4 +1,5 @@
 use core::marker::PhantomData;
+use std::cmp::max;
 
 use ethereum_types::U256;
 use itertools::Itertools;
@@ -27,7 +28,7 @@ use crate::memory::columns::{
     SEGMENT_FIRST_CHANGE, TIMESTAMP, TIMESTAMP_INV, VIRTUAL_FIRST_CHANGE,
 };
 use crate::memory::VALUE_LIMBS;
-use crate::witness::memory::MemoryOpKind::Read;
+use crate::witness::memory::MemoryOpKind::{self, Read};
 use crate::witness::memory::{MemoryAddress, MemoryOp};
 
 /// Creates the vector of `Columns` corresponding to:
@@ -196,6 +197,26 @@ impl<F: RichField + Extendable<D>, const D: usize> MemoryStark<F, D> {
     ) -> (Vec<[F; NUM_COLUMNS]>, usize) {
         // fill_gaps expects an ordered list of operations.
         memory_ops.sort_by_key(MemoryOp::sorting_key);
+
+        // If the first virtual address is not 0, then add a dummy operation at the
+        // start.
+        if memory_ops[0].address.virt != 0 {
+            let first_mem = MemoryOp {
+                filter: false,
+                timestamp: 1,
+                address: MemoryAddress {
+                    context: 0,
+                    segment: 0,
+                    virt: 0,
+                },
+                kind: MemoryOpKind::Read,
+                value: 0.into(),
+            };
+            memory_ops.reverse();
+            memory_ops.push(first_mem);
+            memory_ops.reverse();
+        }
+
         Self::fill_gaps(&mut memory_ops);
 
         let unpadded_length = memory_ops.len();
@@ -230,8 +251,6 @@ impl<F: RichField + Extendable<D>, const D: usize> MemoryStark<F, D> {
             if (trace_col_vecs[CONTEXT_FIRST_CHANGE][i] == F::ONE)
                 || (trace_col_vecs[SEGMENT_FIRST_CHANGE][i] == F::ONE)
             {
-                // CONTEXT_FIRST_CHANGE and SEGMENT_FIRST_CHANGE should be 0 at the last row, so
-                // the index should never be out of bounds.
                 if i < trace_col_vecs[ADDR_VIRTUAL].len() - 1 {
                     let x_val = trace_col_vecs[ADDR_VIRTUAL][i + 1].to_canonical_u64() as usize;
                     trace_col_vecs[FREQUENCIES][x_val] += F::ONE;

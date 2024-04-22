@@ -382,8 +382,6 @@ pub fn generate_traces<F: RichField + Extendable<D>, const D: usize>(
 
     state.set_segment_data(segment_data);
 
-    initialize_shift_table(&mut segment_data.memory);
-
     // Retrieve initial memory addresses and values.
     let actual_mem_before = get_all_memory_address_and_values(&segment_data.memory, &mut state);
 

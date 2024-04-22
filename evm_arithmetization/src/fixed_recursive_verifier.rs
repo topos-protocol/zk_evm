@@ -1062,29 +1062,10 @@ where
     ) where
         F: RichField + Extendable<D>,
     {
-        // At the start of a transaction proof, `MemBefore` only contains the
-        // `ShiftTable`.
+        // At the start of a transaction proof, `MemBefore` only contains padding rows.
         let mut trace = vec![];
 
-        // Push shift table.
-        for i in 0..256 {
-            let mut row = vec![F::ZERO; crate::memory_continuation::columns::NUM_COLUMNS];
-            let val = U256::from(1) << i;
-            row[crate::memory_continuation::columns::FILTER] = F::ONE;
-            row[crate::memory_continuation::columns::ADDR_CONTEXT] = F::ZERO;
-            row[crate::memory_continuation::columns::ADDR_SEGMENT] =
-                F::from_canonical_usize(Segment::ShiftTable.unscale());
-            row[crate::memory_continuation::columns::ADDR_VIRTUAL] = F::from_canonical_usize(i);
-            for j in 0..crate::memory::VALUE_LIMBS {
-                row[j + 4] = F::from_canonical_u32((val >> (j * 32)).low_u32());
-            }
-            trace.push(row);
-        }
-
-        // Padding.
-        let num_rows = trace.len();
-        let num_rows_padded = num_rows.next_power_of_two();
-        for _ in num_rows..num_rows_padded {
+        for _ in 0..128 {
             trace.push(vec![
                 F::ZERO;
                 crate::memory_continuation::columns::NUM_COLUMNS

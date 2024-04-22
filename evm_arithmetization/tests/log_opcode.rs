@@ -460,7 +460,7 @@ fn test_log_with_aggreg() -> anyhow::Result<()> {
             8..11,
             4..13,
             16..20,
-            8..18,
+            7..18,
             7..17,
         ],
         &config,
