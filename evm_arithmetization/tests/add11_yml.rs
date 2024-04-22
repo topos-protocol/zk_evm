@@ -244,7 +244,7 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
         all_circuits.verify_root(proof.clone())?;
     }
 
-    assert_eq!(all_segment_proofs.len(), 3);
+    assert_eq!(all_segment_proofs.len(), 4);
 
     let (first_aggreg_proof, first_aggreg_pv) = all_circuits.prove_segment_aggregation(
         false,
@@ -263,6 +263,16 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
         false,
         &all_segment_proofs[2].proof_with_pis,
         all_segment_proofs[2].public_values.clone(),
+    )?;
+    all_circuits.verify_segment_aggregation(&second_aggreg_proof)?;
+
+    let (third_aggreg_proof, third_aggreg_pv) = all_circuits.prove_segment_aggregation(
+        true,
+        &second_aggreg_proof,
+        second_aggreg_pv,
+        false,
+        &all_segment_proofs[3].proof_with_pis,
+        all_segment_proofs[3].public_values.clone(),
     )?;
     all_circuits.verify_segment_aggregation(&second_aggreg_proof)?;
 
@@ -315,8 +325,8 @@ fn add11_segments_aggreg() -> anyhow::Result<()> {
         &dummy_aggreg.0,
         dummy_aggreg.1,
         false,
-        &second_aggreg_proof,
-        second_aggreg_pv,
+        &third_aggreg_proof,
+        third_aggreg_pv,
     )?;
     all_circuits.verify_txn_aggregation(&txn_aggreg_proof)
 }
