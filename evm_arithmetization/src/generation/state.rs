@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail};
 use ethereum_types::{Address, BigEndianHash, H160, H256, U256};
 use itertools::Itertools;
 use keccak_hash::keccak;
+use mpt_trie::partial_trie::HashedPartialTrie;
 use plonky2::field::types::Field;
 
 use super::mpt::{load_all_mpts, TrieRootPtrs};
@@ -12,8 +13,10 @@ use super::TrieInputs;
 use crate::byte_packing::byte_packing_stark::BytePackingOp;
 use crate::cpu::kernel::aggregator::KERNEL;
 use crate::cpu::kernel::constants::context_metadata::ContextMetadata;
+use crate::cpu::kernel::constants::global_metadata::GlobalMetadata;
 use crate::cpu::stack::MAX_USER_STACK_SIZE;
 use crate::generation::rlp::all_rlp_prover_inputs_reversed;
+use crate::generation::trie_extractor::get_state_trie;
 use crate::generation::CpuColumnsView;
 use crate::generation::GenerationInputs;
 use crate::keccak_sponge::columns::KECCAK_WIDTH_BYTES;
@@ -217,6 +220,19 @@ pub(crate) trait State<F: Field> {
             Err(e) => {
                 if self.get_registers().is_kernel {
                     let offset_name = KERNEL.offset_name(self.get_registers().program_counter);
+                    // TODO: Matame por favor!
+                    {
+                        let state_trie_ptr = u256_to_usize(
+                            self.get_generation_state()
+                                .memory
+                                .read_global_metadata(GlobalMetadata::StateTrieRoot),
+                        )
+                        .unwrap();
+                        let state_trie: HashedPartialTrie =
+                            get_state_trie(&self.get_generation_state().memory, state_trie_ptr)
+                                .unwrap();
+                        log::debug!("final state trie = {:#?}", state_trie);
+                    }
                     bail!(
                         "{:?} in kernel at pc={}, stack={:?}, memory={:?}",
                         e,

@@ -42,14 +42,14 @@ global debug_state:
         %assert_eq
 
     // stack: trie_data_len
-    // %mpt_hash_txn_trie  %mload_global_metadata(@GLOBAL_METADATA_TXN_TRIE_DIGEST_BEFORE)    
+    %mpt_hash_txn_trie  %mload_global_metadata(@GLOBAL_METADATA_TXN_TRIE_DIGEST_BEFORE)    
 global debug_txn:
-    // %assert_eq
+    %assert_eq
 global debug_txn_ok:
     // stack: trie_data_len
-    // %mpt_hash_receipt_trie %mload_global_metadata(@GLOBAL_METADATA_RECEIPT_TRIE_DIGEST_BEFORE)
+    %mpt_hash_receipt_trie %mload_global_metadata(@GLOBAL_METADATA_RECEIPT_TRIE_DIGEST_BEFORE)
 global debug_receipt:
-    // %assert_eq
+    %assert_eq
     // stack: trie_data_full_len
     %mstore_global_metadata(@GLOBAL_METADATA_TRIE_DATA_SIZE)
 global debug_todos:
@@ -107,12 +107,12 @@ global perform_final_checks:
     PUSH 1 // initial trie data length
 global check_state_trie:
     %mpt_hash_state_trie   %mload_global_metadata(@GLOBAL_METADATA_STATE_TRIE_DIGEST_AFTER)
-//global debug_final_state_trie_hash:
-//    %assert_eq
+global debug_final_state_trie_hash:
+    %assert_eq
 global check_txn_trie:
-    //%mpt_hash_txn_trie     %mload_global_metadata(@GLOBAL_METADATA_TXN_TRIE_DIGEST_AFTER)       %assert_eq
+    %mpt_hash_txn_trie     %mload_global_metadata(@GLOBAL_METADATA_TXN_TRIE_DIGEST_AFTER)       %assert_eq
 global check_receipt_trie:
-    //%mpt_hash_receipt_trie %mload_global_metadata(@GLOBAL_METADATA_RECEIPT_TRIE_DIGEST_AFTER)   %assert_eq
+    %mpt_hash_receipt_trie %mload_global_metadata(@GLOBAL_METADATA_RECEIPT_TRIE_DIGEST_AFTER)   %assert_eq
     // We don't need the trie data length here.
     POP
     %jump(halt)
