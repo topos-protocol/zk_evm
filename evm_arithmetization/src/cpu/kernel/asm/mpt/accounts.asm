@@ -31,21 +31,10 @@
     // stack: account_ptr
 %endmacro
 
-// Return a pointer to the provided key's data in the state trie.
-%macro get_account_data_from_key(key)
-    PUSH $key %mpt_read_state_trie_from_key
-    // stack: account_ptr
-    // account_ptr should be non-null as long as the prover provided the proper
-    // Merkle data. But a bad prover may not have, and we don't want return a
-    // null pointer for security reasons.
-    DUP1 ISZERO %jumpi(panic)
-    // stack: account_ptr
-%endmacro
-
 // Returns a pointer to the root of the storage trie associated with the provided account.
-%macro get_storage_trie_from_key(key)
+%macro get_storage_trie(key)
     // stack: (empty)
-    %get_account_data_from_key($key)
+    %get_account_data($key)
     // stack: account_ptr
     %add_const(2)
     // stack: storage_root_ptr_ptr
