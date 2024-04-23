@@ -231,7 +231,6 @@ pub(crate) trait State<F: Field> {
                         let state_trie: HashedPartialTrie =
                             get_state_trie(&self.get_generation_state().memory, state_trie_ptr)
                                 .unwrap();
-                        log::debug!("final state trie = {:#?}", state_trie);
                     }
                     bail!(
                         "{:?} in kernel at pc={}, stack={:?}, memory={:?}",
