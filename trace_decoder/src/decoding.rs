@@ -22,7 +22,8 @@ use thiserror::Error;
 
 use crate::{
     processed_block_trace::{
-        NodesUsedByTxn, ProcessedBlockTrace, ProcessedTxnInfo, StateTrieWrites, TxnMetaState,
+        BatchProcessedTxnInfo, BatchTxnMetaState, NodesUsedByTxn, ProcessedBlockTrace,
+        ProcessedTxnInfo, StateTrieWrites, TxnMetaState,
     },
     types::{
         HashedAccountAddr, HashedNodeAddr, HashedStorageAddr, HashedStorageAddrNibbles,
@@ -290,6 +291,104 @@ impl ProcessedBlockTrace {
         Ok(txn_gen_inputs)
     }
 
+    pub(crate) fn into_batch_txn_proof_gen_ir(
+        self,
+        other_data: OtherBlockData,
+        nb_txns_in_batch: usize,
+    ) -> TraceParsingResult<Vec<GenerationInputs>> {
+        let mut curr_block_tries = PartialTrieState {
+            state: self.tries.state.clone(),
+            storage: self.tries.storage.clone(),
+            ..Default::default()
+        };
+
+        // This is just a copy of `curr_block_tries`.
+        let initial_tries_for_dummies = PartialTrieState {
+            state: self.tries.state,
+            storage: self.tries.storage,
+            ..Default::default()
+        };
+
+        let mut extra_data = ExtraBlockData {
+            checkpoint_state_trie_root: other_data.checkpoint_state_trie_root,
+            txn_number_before: U256::zero(),
+            txn_number_after: U256::zero(),
+            gas_used_before: U256::zero(),
+            gas_used_after: U256::zero(),
+        };
+
+        // A copy of the initial extra_data possibly needed during padding.
+        let extra_data_for_dummies = extra_data.clone();
+
+        let mut txn_gen_inputs = self
+            .txn_info
+            .into_iter()
+            .enumerate()
+            .map(|(txn_idx, txn_info)| {
+                Self::process_txn_info(
+                    txn_idx,
+                    txn_info,
+                    &mut curr_block_tries,
+                    &mut extra_data,
+                    &other_data,
+                )
+                .map_err(|mut e| {
+                    e.txn_idx(txn_idx);
+                    e
+                })
+            })
+            .collect::<TraceParsingResult<Vec<_>>>()
+            .map_err(|mut e| {
+                e.block_num(other_data.b_data.b_meta.block_number);
+                e.block_chain_id(other_data.b_data.b_meta.block_chain_id);
+                e
+            })?;
+
+        Self::pad_gen_inputs_with_dummy_inputs_if_needed(
+            &mut txn_gen_inputs,
+            &other_data,
+            &extra_data,
+            &extra_data_for_dummies,
+            &initial_tries_for_dummies,
+            &curr_block_tries,
+        );
+
+        if !self.withdrawals.is_empty() {
+            Self::add_withdrawals_to_txns(
+                &mut txn_gen_inputs,
+                &mut curr_block_tries,
+                self.withdrawals,
+            )?;
+        }
+
+        let txn_gen_inputs = txn_gen_inputs
+            .chunks(nb_txns_in_batch)
+            .map(|batched_txns| {
+                let signed_txns = batched_txns
+                    .iter()
+                    .flat_map(|txn| txn.signed_txns.clone())
+                    .collect();
+                let withdrawals = batched_txns
+                    .iter()
+                    .flat_map(|txn| txn.withdrawals.clone())
+                    .collect();
+                let first_txn = &batched_txns[0];
+                let txn_default = GenerationInputs::default();
+                let last_txn = batched_txns.last().unwrap_or(&txn_default);
+                GenerationInputs {
+                    txn_number_before: first_txn.txn_number_before,
+                    gas_used_before: first_txn.gas_used_before,
+                    signed_txns,
+                    withdrawals,
+                    tries: first_txn.tries.clone(),
+                    ..last_txn.clone()
+                }
+            })
+            .collect();
+
+        Ok(txn_gen_inputs)
+    }
+
     fn update_txn_and_receipt_tries(
         trie_state: &mut PartialTrieState,
         meta: &TxnMetaState,
@@ -301,6 +400,21 @@ impl ProcessedBlockTrace {
         trie_state
             .receipt
             .insert(txn_k, meta.receipt_node_bytes.as_ref());
+    }
+
+    fn update_txns_and_receipt_tries(
+        trie_state: &mut PartialTrieState,
+        meta: &BatchTxnMetaState,
+        txn_indices: &[TxnIdx],
+    ) {
+        for (i, txn_idx) in txn_indices.iter().enumerate() {
+            let txn_k = Nibbles::from_bytes_be(&rlp::encode(txn_idx)).unwrap();
+            trie_state.txn.insert(txn_k, meta.txns_bytes[i].clone());
+
+            trie_state
+                .receipt
+                .insert(txn_k, meta.receipt_node_bytes[i].as_ref());
+        }
     }
 
     /// If the account does not have a storage trie or does but is not
@@ -364,10 +478,53 @@ impl ProcessedBlockTrace {
         })
     }
 
+    fn create_minimal_partial_tries_needed_by_batch_txn(
+        curr_block_tries: &PartialTrieState,
+        nodes_used_by_txn: &NodesUsedByTxn,
+        txn_indices: &[TxnIdx],
+        delta_application_out: TrieDeltaApplicationOutput,
+        _coin_base_addr: &Address,
+    ) -> TraceParsingResult<TrieInputs> {
+        let state_trie = create_minimal_state_partial_trie(
+            &curr_block_tries.state,
+            nodes_used_by_txn.state_accesses.iter().cloned(),
+            delta_application_out
+                .additional_state_trie_paths_to_not_hash
+                .into_iter(),
+        )?;
+
+        let mut transactions_trie = HashedPartialTrie::default();
+        let mut receipts_trie = HashedPartialTrie::default();
+        for txn_idx in txn_indices {
+            let txn_k = Nibbles::from_bytes_be(&rlp::encode(txn_idx)).unwrap();
+            // TODO: Replace cast once `mpt_trie` supports `into` for `usize...
+            transactions_trie =
+                create_trie_subset_wrapped(&curr_block_tries.txn, once(txn_k), TrieType::Txn)?;
+
+            receipts_trie = create_trie_subset_wrapped(
+                &curr_block_tries.receipt,
+                once(txn_k),
+                TrieType::Receipt,
+            )?;
+        }
+        let storage_tries = create_minimal_storage_partial_tries(
+            &curr_block_tries.storage,
+            &nodes_used_by_txn.state_accounts_with_no_accesses_but_storage_tries,
+            nodes_used_by_txn.storage_accesses.iter(),
+            &delta_application_out.additional_storage_trie_paths_to_not_hash,
+        )?;
+
+        Ok(TrieInputs {
+            state_trie,
+            transactions_trie,
+            receipts_trie,
+            storage_tries,
+        })
+    }
+
     fn apply_deltas_to_trie_state(
         trie_state: &mut PartialTrieState,
         deltas: &NodesUsedByTxn,
-        meta: &TxnMetaState,
     ) -> TraceParsingResult<TrieDeltaApplicationOutput> {
         let mut out = TrieDeltaApplicationOutput::default();
 
@@ -611,6 +768,74 @@ impl ProcessedBlockTrace {
         Ok(())
     }
 
+    fn process_txns_info(
+        txn_indices: &[usize],
+        txn_info: &BatchProcessedTxnInfo,
+        curr_block_tries: &mut PartialTrieState,
+        extra_data: &mut ExtraBlockData,
+        other_data: &OtherBlockData,
+    ) -> TraceParsingResult<GenerationInputs> {
+        trace!("Generating proof IR for txn {:?}...", txn_indices);
+
+        Self::init_any_needed_empty_storage_tries(
+            &mut curr_block_tries.storage,
+            txn_info
+                .nodes_used_by_txn
+                .storage_accesses
+                .iter()
+                .map(|(k, _)| k),
+            &txn_info
+                .nodes_used_by_txn
+                .state_accounts_with_no_accesses_but_storage_tries,
+        );
+        // For each non-dummy txn, we increment `txn_number_after` by 1, and
+        // update `gas_used_after` accordingly.
+        extra_data.txn_number_after += txn_indices.len().into();
+        extra_data.gas_used_after += txn_info.meta.gas_used.into();
+
+        // Because we need to run delta application before creating the minimal
+        // sub-tries (we need to detect if deletes collapsed any branches), we need to
+        // do this clone every iteration.
+        let tries_at_start_of_txn = curr_block_tries.clone();
+
+        Self::update_txns_and_receipt_tries(curr_block_tries, &txn_info.meta, txn_indices);
+
+        let delta_out =
+            Self::apply_deltas_to_trie_state(curr_block_tries, &txn_info.nodes_used_by_txn)?;
+
+        let tries = Self::create_minimal_partial_tries_needed_by_batch_txn(
+            &tries_at_start_of_txn,
+            &txn_info.nodes_used_by_txn,
+            txn_indices,
+            delta_out,
+            &other_data.b_data.b_meta.block_beneficiary,
+        )?;
+
+        let trie_roots_after = calculate_trie_input_hashes(curr_block_tries);
+        let gen_inputs = GenerationInputs {
+            txn_number_before: extra_data.txn_number_before,
+            gas_used_before: extra_data.gas_used_before,
+            gas_used_after: extra_data.gas_used_after,
+            signed_txns: txn_info.meta.txns_bytes.clone(),
+            withdrawals: Vec::default(), /* Only ever set in a dummy txn at the end of
+                                          * the block (see `[add_withdrawals_to_txns]`
+                                          * for more info). */
+            tries,
+            trie_roots_after,
+            checkpoint_state_trie_root: extra_data.checkpoint_state_trie_root,
+            contract_code: txn_info.contract_code_accessed.clone(),
+            block_metadata: other_data.b_data.b_meta.clone(),
+            block_hashes: other_data.b_data.b_hashes.clone(),
+        };
+
+        // After processing a transaction, we update the remaining accumulators
+        // for the next transaction.
+        extra_data.txn_number_after += txn_indices.len().into();
+        extra_data.gas_used_after += txn_info.meta.gas_used.into();
+
+        Ok(gen_inputs)
+    }
+
     /// Processes a single transaction in the trace.
     fn process_txn_info(
         txn_idx: usize,
@@ -644,11 +869,8 @@ impl ProcessedBlockTrace {
 
         Self::update_txn_and_receipt_tries(curr_block_tries, &txn_info.meta, txn_idx);
 
-        let delta_out = Self::apply_deltas_to_trie_state(
-            curr_block_tries,
-            &txn_info.nodes_used_by_txn,
-            &txn_info.meta,
-        )?;
+        let delta_out =
+            Self::apply_deltas_to_trie_state(curr_block_tries, &txn_info.nodes_used_by_txn)?;
 
         let tries = Self::create_minimal_partial_tries_needed_by_txn(
             &tries_at_start_of_txn,

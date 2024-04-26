@@ -130,6 +130,20 @@ pub struct TxnInfo {
     pub meta: TxnMeta,
 }
 
+/// Info specific to txns in the block.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BatchTxnInfo {
+    /// Trace data for the txn. This is used by the protocol to:
+    /// - Mutate it's own trie state between txns to arrive at the correct trie
+    ///   state for the start of each txn.
+    /// - Create minimal partial tries needed for proof gen based on what state
+    ///   the txn accesses. (eg. What trie nodes are accessed).
+    pub traces: Vec<HashMap<Address, TxnTrace>>,
+
+    /// Data that is specific to the txn as a whole.
+    pub meta: Vec<TxnMeta>,
+}
+
 /// Structure holding metadata for one transaction.
 #[serde_as]
 #[derive(Debug, Deserialize, Serialize)]

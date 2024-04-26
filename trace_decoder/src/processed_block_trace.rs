@@ -13,7 +13,7 @@ use crate::compact::compact_prestate_processing::{
 };
 use crate::decoding::TraceParsingResult;
 use crate::trace_protocol::{
-    BlockTrace, BlockTraceTriePreImages, CombinedPreImages, ContractCodeUsage,
+    BatchTxnInfo, BlockTrace, BlockTraceTriePreImages, CombinedPreImages, ContractCodeUsage,
     SeparateStorageTriesPreImage, SeparateTriePreImage, SeparateTriePreImages, TrieCompact,
     TrieUncompressed, TxnInfo,
 };
@@ -50,6 +50,23 @@ impl BlockTrace {
             self.into_processed_block_trace(p_meta, other_data.b_data.withdrawals.clone());
 
         processed_block_trace.into_txn_proof_gen_ir(other_data)
+    }
+
+    /// Processes and returns the [GenerationInputs] for all transactions in the
+    /// block in a batched manner.
+    pub fn into_batch_txn_proof_gen_ir<F>(
+        self,
+        p_meta: &ProcessingMeta<F>,
+        other_data: OtherBlockData,
+        nb_txns_per_batch: usize,
+    ) -> TraceParsingResult<Vec<GenerationInputs>>
+    where
+        F: CodeHashResolveFunc,
+    {
+        let processed_block_trace =
+            self.into_processed_block_trace(p_meta, other_data.b_data.withdrawals.clone());
+
+        processed_block_trace.into_batch_txn_proof_gen_ir(other_data, nb_txns_per_batch)
     }
 
     fn into_processed_block_trace<F>(
@@ -236,6 +253,13 @@ pub(crate) struct ProcessedTxnInfo {
     pub(crate) meta: TxnMetaState,
 }
 
+#[derive(Debug)]
+pub(crate) struct BatchProcessedTxnInfo {
+    pub(crate) nodes_used_by_txn: NodesUsedByTxn,
+    pub(crate) contract_code_accessed: HashMap<CodeHash, Vec<u8>>,
+    pub(crate) meta: BatchTxnMetaState,
+}
+
 struct CodeHashResolving<F> {
     /// If we have not seen this code hash before, use the resolve function that
     /// the client passes down to us. This will likely be an rpc call/cache
@@ -258,6 +282,159 @@ impl<F: CodeHashResolveFunc> CodeHashResolving<F> {
 
     fn insert_code(&mut self, c_hash: H256, code: Vec<u8>) {
         self.extra_code_hash_mappings.insert(c_hash, code);
+    }
+}
+
+impl BatchTxnInfo {
+    fn into_processed_txn_info<F: CodeHashResolveFunc>(
+        self,
+        all_accounts_in_pre_image: &[(HashedAccountAddr, AccountRlp)],
+        extra_state_accesses: &[HashedAccountAddr],
+        code_hash_resolver: &mut CodeHashResolving<F>,
+    ) -> BatchProcessedTxnInfo {
+        let mut nodes_used_by_txn = NodesUsedByTxn::default();
+        let mut contract_code_accessed = create_empty_code_access_map();
+
+        let mut trace_accounts: HashMap<ethereum_types::H160, crate::trace_protocol::TxnTrace> =
+            HashMap::default();
+        for txn_traces in self.traces {
+            for (addr, trace) in txn_traces {
+                if !trace_accounts.contains_key(&addr) {
+                    trace_accounts.insert(addr, trace);
+                }
+            }
+        }
+        for (addr, trace) in trace_accounts {
+            let hashed_addr = hash(addr.as_bytes());
+
+            let storage_writes = trace.storage_written.unwrap_or_default();
+
+            let storage_read_keys = trace
+                .storage_read
+                .into_iter()
+                .flat_map(|reads| reads.into_iter());
+
+            let storage_write_keys = storage_writes.keys();
+            let storage_access_keys = storage_read_keys.chain(storage_write_keys.copied());
+
+            nodes_used_by_txn.storage_accesses.push((
+                hashed_addr,
+                storage_access_keys
+                    .map(|k| Nibbles::from_h256_be(hash(&k.0)))
+                    .collect(),
+            ));
+
+            let storage_trie_change = !storage_writes.is_empty();
+            let code_change = trace.code_usage.is_some();
+            let state_write_occurred = trace.balance.is_some()
+                || trace.nonce.is_some()
+                || storage_trie_change
+                || code_change;
+
+            if state_write_occurred {
+                let state_trie_writes = StateTrieWrites {
+                    balance: trace.balance,
+                    nonce: trace.nonce,
+                    storage_trie_change,
+                    code_hash: trace.code_usage.as_ref().map(|usage| usage.get_code_hash()),
+                };
+
+                nodes_used_by_txn
+                    .state_writes
+                    .push((hashed_addr, state_trie_writes))
+            }
+
+            let storage_writes_vec = storage_writes
+                .into_iter()
+                .map(|(k, v)| (Nibbles::from_h256_be(k), rlp::encode(&v).to_vec()))
+                .collect();
+
+            nodes_used_by_txn
+                .storage_writes
+                .push((hashed_addr, storage_writes_vec));
+
+            nodes_used_by_txn.state_accesses.push(hashed_addr);
+
+            if let Some(c_usage) = trace.code_usage {
+                match c_usage {
+                    ContractCodeUsage::Read(c_hash) => {
+                        contract_code_accessed
+                            .entry(c_hash)
+                            .or_insert_with(|| code_hash_resolver.resolve(&c_hash));
+                    }
+                    ContractCodeUsage::Write(c_bytes) => {
+                        let c_hash = hash(&c_bytes);
+
+                        contract_code_accessed.insert(c_hash, c_bytes.0.clone());
+                        code_hash_resolver.insert_code(c_hash, c_bytes.0);
+                    }
+                }
+            }
+
+            if trace
+                .self_destructed
+                .map_or(false, |self_destructed| self_destructed)
+            {
+                nodes_used_by_txn.self_destructed_accounts.push(hashed_addr);
+            }
+        }
+
+        for &hashed_addr in extra_state_accesses {
+            nodes_used_by_txn.state_accesses.push(hashed_addr);
+        }
+
+        let accounts_with_storage_accesses: HashSet<_> = HashSet::from_iter(
+            nodes_used_by_txn
+                .storage_accesses
+                .iter()
+                .filter(|(_, slots)| !slots.is_empty())
+                .map(|(addr, _)| *addr),
+        );
+
+        let all_accounts_with_non_empty_storage = all_accounts_in_pre_image
+            .iter()
+            .filter(|(_, data)| data.storage_root != EMPTY_TRIE_HASH);
+
+        let accounts_with_storage_but_no_storage_accesses = all_accounts_with_non_empty_storage
+            .filter(|&(addr, _data)| !accounts_with_storage_accesses.contains(addr))
+            .map(|(addr, data)| (*addr, data.storage_root));
+
+        nodes_used_by_txn
+            .state_accounts_with_no_accesses_but_storage_tries
+            .extend(accounts_with_storage_but_no_storage_accesses);
+
+        let all_txn_bytes = self
+            .meta
+            .iter()
+            .filter_map(|m| {
+                if m.byte_code.is_empty() {
+                    None
+                } else {
+                    Some(m.byte_code.clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        let all_receipt_node_bytes = self
+            .meta
+            .iter()
+            .map(|m| process_rlped_receipt_node_bytes(m.new_receipt_trie_node_byte.clone()))
+            .collect::<Vec<_>>();
+
+        let last_gas = match self.meta.last() {
+            Some(m) => m.gas_used,
+            None => 0,
+        };
+        let new_meta_state = BatchTxnMetaState {
+            txns_bytes: all_txn_bytes,
+            receipt_node_bytes: all_receipt_node_bytes,
+            gas_used: last_gas,
+        };
+
+        BatchProcessedTxnInfo {
+            nodes_used_by_txn,
+            contract_code_accessed,
+            meta: new_meta_state,
+        }
     }
 }
 
@@ -435,5 +612,12 @@ pub(crate) struct StateTrieWrites {
 pub(crate) struct TxnMetaState {
     pub(crate) txn_bytes: Option<Vec<u8>>,
     pub(crate) receipt_node_bytes: Vec<u8>,
+    pub(crate) gas_used: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BatchTxnMetaState {
+    pub(crate) txns_bytes: Vec<Vec<u8>>,
+    pub(crate) receipt_node_bytes: Vec<Vec<u8>>,
     pub(crate) gas_used: u64,
 }
