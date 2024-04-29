@@ -47,6 +47,19 @@ pub struct BlockTrace {
     pub txn_info: Vec<TxnInfo>,
 }
 
+/// Core payload needed to generate a proof for a block with batched
+/// transactions. Note that the scheduler may need to request some additional
+/// data from the client along with this in order to generate a proof.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BatchBlockTrace {
+    /// The trie pre-images (state & storage) in multiple possible formats.
+    pub trie_pre_images: BlockTraceTriePreImages,
+
+    /// Traces and other info per txn. The index of the txn corresponds to the
+    /// slot in this vec.
+    pub txn_info: Vec<BatchTxnInfo>,
+}
+
 /// Minimal hashed out tries needed by all txns in the block.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,7 +159,7 @@ pub struct BatchTxnInfo {
 
 /// Structure holding metadata for one transaction.
 #[serde_as]
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxnMeta {
     /// Txn byte code.
     #[serde_as(as = "FromInto<ByteString>")]
@@ -172,7 +185,7 @@ pub struct TxnMeta {
 ///
 /// Specifically, since we can not execute the txn before proof generation, we
 /// rely on a separate EVM to run the txn and supply this data for us.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxnTrace {
     /// If the balance changed, then the new balance will appear here. Will be
     /// `None` if no change.
@@ -208,7 +221,7 @@ pub struct TxnTrace {
 
 /// Contract code access type. Used by txn traces.
 #[serde_as]
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ContractCodeUsage {
     /// Contract was read.

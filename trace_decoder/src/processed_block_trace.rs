@@ -13,9 +13,9 @@ use crate::compact::compact_prestate_processing::{
 };
 use crate::decoding::TraceParsingResult;
 use crate::trace_protocol::{
-    BatchTxnInfo, BlockTrace, BlockTraceTriePreImages, CombinedPreImages, ContractCodeUsage,
-    SeparateStorageTriesPreImage, SeparateTriePreImage, SeparateTriePreImages, TrieCompact,
-    TrieUncompressed, TxnInfo,
+    BatchBlockTrace, BatchTxnInfo, BlockTrace, BlockTraceTriePreImages, CombinedPreImages,
+    ContractCodeUsage, SeparateStorageTriesPreImage, SeparateTriePreImage, SeparateTriePreImages,
+    TrieCompact, TrieUncompressed, TxnInfo,
 };
 use crate::types::{
     CodeHash, CodeHashResolveFunc, HashedAccountAddr, HashedNodeAddr, HashedStorageAddr,
@@ -30,6 +30,13 @@ use crate::utils::{
 pub(crate) struct ProcessedBlockTrace {
     pub(crate) tries: PartialTriePreImages,
     pub(crate) txn_info: Vec<ProcessedTxnInfo>,
+    pub(crate) withdrawals: Vec<(Address, U256)>,
+}
+
+#[derive(Debug)]
+pub(crate) struct BatchProcessedBlockTrace {
+    pub(crate) tries: PartialTriePreImages,
+    pub(crate) txn_info: Vec<BatchProcessedTxnInfo>,
     pub(crate) withdrawals: Vec<(Address, U256)>,
 }
 
@@ -50,23 +57,6 @@ impl BlockTrace {
             self.into_processed_block_trace(p_meta, other_data.b_data.withdrawals.clone());
 
         processed_block_trace.into_txn_proof_gen_ir(other_data)
-    }
-
-    /// Processes and returns the [GenerationInputs] for all transactions in the
-    /// block in a batched manner.
-    pub fn into_batch_txn_proof_gen_ir<F>(
-        self,
-        p_meta: &ProcessingMeta<F>,
-        other_data: OtherBlockData,
-        nb_txns_per_batch: usize,
-    ) -> TraceParsingResult<Vec<GenerationInputs>>
-    where
-        F: CodeHashResolveFunc,
-    {
-        let processed_block_trace =
-            self.into_processed_block_trace(p_meta, other_data.b_data.withdrawals.clone());
-
-        processed_block_trace.into_batch_txn_proof_gen_ir(other_data, nb_txns_per_batch)
     }
 
     fn into_processed_block_trace<F>(
@@ -138,6 +128,210 @@ impl BlockTrace {
             withdrawals,
         }
     }
+
+    //     // /// Processes and returns the [GenerationInputs] for all transactions
+    // in the     // /// block in a batched manner.
+    //     // pub fn into_batch_txn_proof_gen_ir<F>(
+    //     //     self,
+    //     //     p_meta: &ProcessingMeta<F>,
+    //     //     other_data: OtherBlockData,
+    //     //     nb_txns_per_batch: usize,
+    //     // ) -> TraceParsingResult<Vec<GenerationInputs>>
+    //     // where
+    //     //     F: CodeHashResolveFunc,
+    //     // {
+    //     //     let processed_block_trace =
+    //     //         self.into_processed_block_trace(p_meta,
+    //     // other_data.b_data.withdrawals.clone());
+
+    //     //     processed_block_trace.into_batch_txn_proof_gen_ir(other_data)
+    //     // }
+    // }
+
+    // impl BatchBlockTrace {
+    /// Processes and returns the [GenerationInputs] for all transactions in the
+    /// block.
+    pub fn into_txns_proof_gen_ir<F>(
+        self,
+        p_meta: &ProcessingMeta<F>,
+        other_data: OtherBlockData,
+        nb_txns_per_batch: usize,
+    ) -> TraceParsingResult<Vec<GenerationInputs>>
+    where
+        F: CodeHashResolveFunc,
+    {
+        let processed_block_trace = self.into_batch_processed_block_trace(
+            p_meta,
+            other_data.b_data.withdrawals.clone(),
+            nb_txns_per_batch,
+        );
+
+        processed_block_trace.into_txn_proof_gen_ir(other_data, nb_txns_per_batch)
+    }
+
+    fn into_batch_processed_block_trace<F>(
+        self,
+        p_meta: &ProcessingMeta<F>,
+        withdrawals: Vec<(Address, U256)>,
+        nb_txns_per_batch: usize,
+    ) -> BatchProcessedBlockTrace
+    where
+        F: CodeHashResolveFunc,
+    {
+        // The compact format is able to provide actual code, so if it does, we should
+        // take advantage of it.
+        let pre_image_data = process_block_trace_trie_pre_images(self.trie_pre_images);
+
+        print_value_and_hash_nodes_of_trie(&pre_image_data.tries.state);
+
+        for (h_addr, s_trie) in pre_image_data.tries.storage.iter() {
+            print_value_and_hash_nodes_of_storage_trie(h_addr, s_trie);
+        }
+
+        let all_accounts_in_pre_image: Vec<_> = pre_image_data
+            .tries
+            .state
+            .items()
+            .filter_map(|(addr, data)| {
+                data.as_val().map(|data| {
+                    (
+                        h_addr_nibs_to_h256(&addr),
+                        rlp::decode::<AccountRlp>(data).unwrap(),
+                    )
+                })
+            })
+            .collect();
+
+        let mut code_hash_resolver = CodeHashResolving {
+            client_code_hash_resolve_f: &p_meta.resolve_code_hash_fn,
+            extra_code_hash_mappings: pre_image_data.extra_code_hash_mappings.unwrap_or_default(),
+        };
+
+        let last_tx_idx = self.txn_info.len().saturating_sub(1) / nb_txns_per_batch;
+
+        let txn_info = self
+            .txn_info
+            .chunks(nb_txns_per_batch)
+            .enumerate()
+            .map(|(i, t)| {
+                log::info!("chunk nb {:?}", i);
+                let extra_state_accesses = if last_tx_idx == i {
+                    // If this is the last transaction, we mark the withdrawal addresses
+                    // as accessed in the state trie.
+                    withdrawals
+                        .iter()
+                        .map(|(addr, _)| hash(addr.as_bytes()))
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                let b = BatchTxnInfo {
+                    traces: t.iter().map(|info| info.traces.clone()).collect::<Vec<_>>(),
+                    meta: t.iter().map(|info| info.meta.clone()).collect::<Vec<_>>(),
+                };
+                b.into_processed_txn_info(
+                    &all_accounts_in_pre_image,
+                    &extra_state_accesses,
+                    &mut code_hash_resolver,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        BatchProcessedBlockTrace {
+            tries: pre_image_data.tries,
+            txn_info,
+            withdrawals,
+        }
+    }
+
+    // /// Processes and returns the [GenerationInputs] for all transactions in the
+    // /// block in a batched manner.
+    // pub fn into_batch_txn_proof_gen_ir<F>(
+    //     self,
+    //     p_meta: &ProcessingMeta<F>,
+    //     other_data: OtherBlockData,
+    //     nb_txns_per_batch: usize,
+    // ) -> TraceParsingResult<Vec<GenerationInputs>>
+    // where
+    //     F: CodeHashResolveFunc,
+    // {
+    //     let processed_block_trace =
+    //         self.into_processed_block_trace(p_meta,
+    // other_data.b_data.withdrawals.clone());
+
+    //     processed_block_trace.into_batch_txn_proof_gen_ir(other_data,
+    // nb_txns_per_batch) }
+
+    //     fn into_batch_processed_block_trace<F>(
+    //         self,
+    //         p_meta: &ProcessingMeta<F>,
+    //         withdrawals: Vec<(Address, U256)>,
+    //     ) -> BatchProcessedBlockTrace
+    //     where
+    //         F: CodeHashResolveFunc,
+    //     {
+    //         // The compact format is able to provide actual code, so if it does,
+    // we should         // take advantage of it.
+    //         let pre_image_data =
+    // process_block_trace_trie_pre_images(self.trie_pre_images);
+
+    //         print_value_and_hash_nodes_of_trie(&pre_image_data.tries.state);
+
+    //         for (h_addr, s_trie) in pre_image_data.tries.storage.iter() {
+    //             print_value_and_hash_nodes_of_storage_trie(h_addr, s_trie);
+    //         }
+
+    //         let all_accounts_in_pre_image: Vec<_> = pre_image_data
+    //             .tries
+    //             .state
+    //             .items()
+    //             .filter_map(|(addr, data)| {
+    //                 data.as_val().map(|data| {
+    //                     (
+    //                         h_addr_nibs_to_h256(&addr),
+    //                         rlp::decode::<AccountRlp>(data).unwrap(),
+    //                     )
+    //                 })
+    //             })
+    //             .collect();
+
+    //         let mut code_hash_resolver = CodeHashResolving {
+    //             client_code_hash_resolve_f: &p_meta.resolve_code_hash_fn,
+    //             extra_code_hash_mappings:
+    // pre_image_data.extra_code_hash_mappings.unwrap_or_default(),         };
+
+    //         let last_tx_idx = self.txn_info.len().saturating_sub(1);
+
+    //         let txn_info = self
+    //             .txn_info
+    //             .into_iter()
+    //             .enumerate()
+    //             .map(|(i, t)| {
+    //                 let extra_state_accesses = if last_tx_idx == i {
+    //                     // If this is the last transaction, we mark the
+    // withdrawal addresses                     // as accessed in the state
+    // trie.                     withdrawals
+    //                         .iter()
+    //                         .map(|(addr, _)| hash(addr.as_bytes()))
+    //                         .collect::<Vec<_>>()
+    //                 } else {
+    //                     Vec::new()
+    //                 };
+
+    //                 t.into_processed_txn_info(
+    //                     &all_accounts_in_pre_image,
+    //                     &extra_state_accesses,
+    //                     &mut code_hash_resolver,
+    //                 )
+    //             })
+    //             .collect::<Vec<_>>();
+
+    //         BatchProcessedBlockTrace {
+    //             tries: pre_image_data.tries,
+    //             txn_info,
+    //             withdrawals,
+    //         }
+    //     }
 }
 
 #[derive(Debug)]
@@ -292,6 +486,7 @@ impl BatchTxnInfo {
         extra_state_accesses: &[HashedAccountAddr],
         code_hash_resolver: &mut CodeHashResolving<F>,
     ) -> BatchProcessedTxnInfo {
+        log::info!("into processed");
         let mut nodes_used_by_txn = NodesUsedByTxn::default();
         let mut contract_code_accessed = create_empty_code_access_map();
 
@@ -299,11 +494,13 @@ impl BatchTxnInfo {
             HashMap::default();
         for txn_traces in self.traces {
             for (addr, trace) in txn_traces {
+                log::info!("addr {:?}", addr);
                 if !trace_accounts.contains_key(&addr) {
                     trace_accounts.insert(addr, trace);
                 }
             }
         }
+
         for (addr, trace) in trace_accounts {
             let hashed_addr = hash(addr.as_bytes());
 
@@ -316,6 +513,7 @@ impl BatchTxnInfo {
 
             let storage_write_keys = storage_writes.keys();
             let storage_access_keys = storage_read_keys.chain(storage_write_keys.copied());
+            log::info!("storage access keys {:?}", storage_access_keys);
 
             nodes_used_by_txn.storage_accesses.push((
                 hashed_addr,
