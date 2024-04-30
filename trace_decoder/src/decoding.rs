@@ -1667,3 +1667,41 @@ impl TxnMetaState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::{Deserialize, Serialize};
+
+    use super::*;
+    use crate::{
+        processed_block_trace::ProcessingMeta, trace_protocol::BlockTrace, types::CodeHash,
+    };
+
+    fn resolve_code_hash_fn(_: &CodeHash) -> Vec<u8> {
+        todo!()
+    }
+
+    #[derive(Debug, Deserialize, Serialize)]
+    pub struct ProverInput {
+        pub block_trace: BlockTrace,
+        pub other_data: OtherBlockData,
+    }
+
+    #[test]
+    fn parse_block() {
+        let bytes = std::fs::read_to_string("trace.json").unwrap();
+        let des = &mut serde_json::Deserializer::from_str(&bytes);
+        let prover_input: ProverInput = serde_path_to_error::deserialize(des).unwrap();
+
+        let txs = prover_input
+            .block_trace
+            .into_txns_proof_gen_ir(
+                &ProcessingMeta::new(resolve_code_hash_fn),
+                prover_input.other_data.clone(),
+                2,
+            )
+            .unwrap();
+
+        std::fs::write("block_batch.json", &serde_json::to_vec(&txs).unwrap()).unwrap();
+    }
+}
