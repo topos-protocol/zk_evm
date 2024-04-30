@@ -1358,84 +1358,8 @@ impl BatchProcessedBlockTrace {
 
         Ok(gen_inputs)
     }
-
-    // / Processes a single transaction in the trace.
-    // fn process_txn_info(
-    //     txn_idx: usize,
-    //     txn_info: ProcessedTxnInfo,
-    //     curr_block_tries: &mut PartialTrieState,
-    //     extra_data: &mut ExtraBlockData,
-    //     other_data: &OtherBlockData,
-    // ) -> TraceParsingResult<GenerationInputs> {
-    //     trace!("Generating proof IR for txn {}...", txn_idx);
-
-    //     Self::init_any_needed_empty_storage_tries(
-    //         &mut curr_block_tries.storage,
-    //         txn_info
-    //             .nodes_used_by_txn
-    //             .storage_accesses
-    //             .iter()
-    //             .map(|(k, _)| k),
-    //         &txn_info
-    //             .nodes_used_by_txn
-    //             .state_accounts_with_no_accesses_but_storage_tries,
-    //     );
-    //     // For each non-dummy txn, we increment `txn_number_after` by 1, and
-    //     // update `gas_used_after` accordingly.
-    //     extra_data.txn_number_after += U256::one();
-    //     extra_data.gas_used_after += txn_info.meta.gas_used.into();
-
-    //     // Because we need to run delta application before creating the minimal
-    //     // sub-tries (we need to detect if deletes collapsed any branches), we
-    // need to     // do this clone every iteration.
-    //     let tries_at_start_of_txn = curr_block_tries.clone();
-
-    //     Self::update_txn_and_receipt_tries(curr_block_tries, &txn_info.meta,
-    // txn_idx);
-
-    //     let delta_out =
-    //         Self::apply_deltas_to_trie_state(curr_block_tries,
-    // &txn_info.nodes_used_by_txn)?;
-
-    //     let tries = Self::create_minimal_partial_tries_needed_by_txn(
-    //         &tries_at_start_of_txn,
-    //         &txn_info.nodes_used_by_txn,
-    //         txn_idx,
-    //         delta_out,
-    //         &other_data.b_data.b_meta.block_beneficiary,
-    //     )?;
-
-    //     let signed_txns = match txn_info.meta.txn_bytes {
-    //         Some(txn_bytes) => vec![txn_bytes],
-    //         None => vec![],
-    //     };
-    //     let trie_roots_after = calculate_trie_input_hashes(curr_block_tries);
-    //     let gen_inputs = GenerationInputs {
-    //         txn_number_before: extra_data.txn_number_before,
-    //         gas_used_before: extra_data.gas_used_before,
-    //         gas_used_after: extra_data.gas_used_after,
-    //         signed_txns,
-    //         withdrawals: Vec::default(), /* Only ever set in a dummy txn at the
-    // end of
-    //                                       * the block (see
-    //                                         `[add_withdrawals_to_txns]`
-    //                                       * for more info). */
-    //         tries,
-    //         trie_roots_after,
-    //         checkpoint_state_trie_root: extra_data.checkpoint_state_trie_root,
-    //         contract_code: txn_info.contract_code_accessed,
-    //         block_metadata: other_data.b_data.b_meta.clone(),
-    //         block_hashes: other_data.b_data.b_hashes.clone(),
-    //     };
-
-    //     // After processing a transaction, we update the remaining accumulators
-    //     // for the next transaction.
-    //     extra_data.txn_number_before += U256::one();
-    //     extra_data.gas_used_before = extra_data.gas_used_after;
-
-    //     Ok(gen_inputs)
-    // }
 }
+
 impl StateTrieWrites {
     fn apply_writes_to_state_node(
         &self,
