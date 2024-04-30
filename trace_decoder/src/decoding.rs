@@ -1351,10 +1351,10 @@ impl BatchProcessedBlockTrace {
             block_hashes: other_data.b_data.b_hashes.clone(),
         };
 
-        // After processing a transaction, we update the remaining accumulators
+        // After processing a transaction batch, we update the remaining accumulators
         // for the next transaction.
-        extra_data.txn_number_after += txn_indices.len().into();
-        extra_data.gas_used_after += txn_info.meta.gas_used.into();
+        extra_data.txn_number_before = extra_data.txn_number_after;
+        extra_data.gas_used_before = extra_data.gas_used_after;
 
         Ok(gen_inputs)
     }
