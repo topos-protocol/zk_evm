@@ -529,14 +529,12 @@ impl BatchTxnInfo {
             .map(|m| process_rlped_receipt_node_bytes(m.new_receipt_trie_node_byte.clone()))
             .collect::<Vec<_>>();
 
-        let last_gas = match self.meta.last() {
-            Some(m) => m.gas_used,
-            None => 0,
-        };
+        let cum_gas_used = self.meta.iter().map(|m| m.gas_used).sum();
+
         let new_meta_state = BatchTxnMetaState {
             txns_bytes: all_txn_bytes,
             receipt_node_bytes: all_receipt_node_bytes,
-            gas_used: last_gas,
+            gas_used: cum_gas_used,
         };
 
         BatchProcessedTxnInfo {
