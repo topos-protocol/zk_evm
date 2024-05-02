@@ -408,6 +408,32 @@ impl BatchTxnInfo {
                 log::info!("addr {:?}", addr);
                 if !trace_accounts.contains_key(&addr) {
                     trace_accounts.insert(addr, trace);
+                } else {
+                    let mut cur_storage_read = trace_accounts[&addr].storage_read.clone();
+                    let new_storage_read = match cur_storage_read {
+                        Some(storage_read) => {
+                            let mut cur_read = storage_read;
+                            if let Some(read) = trace.storage_read {
+                                cur_read.extend(read);
+                            }
+                            Some(cur_read)
+                        }
+                        None => trace.storage_read,
+                    };
+                    trace_accounts.get_mut(&addr).unwrap().storage_read = new_storage_read;
+
+                    let mut cur_storage_write = trace_accounts[&addr].storage_written.clone();
+                    let new_storage_write = match cur_storage_write {
+                        Some(storage_write) => {
+                            let mut cur_read = storage_write;
+                            if let Some(write) = trace.storage_written {
+                                cur_read.extend(write);
+                            }
+                            Some(cur_read)
+                        }
+                        None => trace.storage_written,
+                    };
+                    trace_accounts.get_mut(&addr).unwrap().storage_written = new_storage_write;
                 }
             }
         }
